@@ -404,6 +404,8 @@ std::optional<mpz> LatticeSolver::recover_private_key(
 
         if (telemetry) {
             telemetry->signatures_used = train_pairs.size();
+            telemetry->current_leak_l = l;
+            telemetry->current_block_size = 0;  // plain LLL, not BKZ
             telemetry->lattice_in_progress = true;
             telemetry->set_phase(std::string(is_lsb ? "Reducing LSB lattice (LLL) b=" : "Reducing lattice (LLL) l=") + std::to_string(l));
         }
@@ -488,6 +490,9 @@ std::optional<mpz> LatticeSolver::recover_private_key(
 
             if (telemetry->remaining_budget_seconds() >= bkz_budget_needed) {
                 telemetry->lattice_in_progress = true;
+                telemetry->signatures_used = trial_pairs.size();
+                telemetry->current_leak_l = best_partial_l;
+                telemetry->current_block_size = block_size;
                 telemetry->set_phase(std::string(is_lsb ? "Escalating to BKZ b=" : "Escalating to BKZ l=") + std::to_string(best_partial_l));
 
                 auto cand_bkz = reduce_and_extract(basis_bkz, trial_pairs, telemetry, block_size);

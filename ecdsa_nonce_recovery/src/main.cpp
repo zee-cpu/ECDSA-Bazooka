@@ -172,7 +172,7 @@ int main(int argc, char** argv) {
     };
     std::cout << "  Type: " << bias_type_name(res.bias_profile.type) << "\n";
     std::cout << "  Leaked bits est: " << res.bias_profile.estimated_leaked_bits << "\n";
-    std::cout << "  Confidence σ: " << res.bias_profile.confidence_sigma << "\n";
+    std::cout << "  Confidence: p < 10^-" << res.bias_profile.neg_log10_p << "\n";
     std::cout << "  Description: " << res.bias_profile.description << "\n";
 
     if (res.success) {

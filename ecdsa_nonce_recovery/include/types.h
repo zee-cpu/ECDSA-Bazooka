@@ -44,7 +44,15 @@ enum class BiasType {
 struct BiasProfile {
     BiasType type = BiasType::UNKNOWN;
     double estimated_leaked_bits = 0.0;
-    double confidence_sigma = 0.0;   // statistical significance
+    // -log10(held-out significance p-value). Despite the superficial
+    // resemblance, this is NOT a sigma/stddev count -- those are different
+    // quantities under the standard statistical convention (p=1e-5 is
+    // ~4.4 sigma, not "5 sigma"). Previously misnamed confidence_sigma and
+    // printed as "Confidence σ:", which misled anyone reading it under the
+    // sigma convention; kept as -log10(p) here since that's what's actually
+    // computed (see bias_profiler.cpp) and how the live TUI already
+    // displays it ("p < 10^-X").
+    double neg_log10_p = 0.0;
     mpz modulo_omega;                // for MODULO bias
     mpz modulo_bound;                // range size within period
     std::string description;
@@ -77,6 +85,13 @@ struct Telemetry {
     std::atomic<size_t> signatures_used{0};
     std::atomic<size_t> current_attempt{0};
     std::atomic<size_t> total_attempts{0};
+
+    // Which trial is currently running, for display alongside lattice_dim:
+    // the leak-bit level (L, or LSB known-bit count) being attempted, and
+    // the BKZ block size (0 for plain LLL trials, since block size only
+    // applies to the BKZ escalation path).
+    std::atomic<int> current_leak_l{0};
+    std::atomic<int> current_block_size{0};
 
     std::atomic<bool> lattice_in_progress{false};
     std::atomic<bool> fft_in_progress{false};
@@ -137,6 +152,8 @@ struct Telemetry {
         signatures_used = 0;
         current_attempt = 0;
         total_attempts = 0;
+        current_leak_l = 0;
+        current_block_size = 0;
         lattice_in_progress = false;
         fft_in_progress = false;
         fft_peak_magnitude = 0.0;

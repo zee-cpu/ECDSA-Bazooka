@@ -233,8 +233,16 @@ void TelemetryRenderer::render_dashboard() {
 
     {
         std::ostringstream oss;
-        oss << BOLD << "Elapsed " << RESET << format_time(elapsed)
-            << "    " << BOLD << "Signatures " << RESET
+        oss << BOLD << "Elapsed " << RESET << format_time(elapsed);
+        // remaining_budget_seconds() returns a large sentinel (1e18) when
+        // --max-time wasn't given -- only show a budget countdown when one
+        // actually applies, rather than printing a meaningless huge number.
+        double remaining = tel_.remaining_budget_seconds();
+        if (remaining < 1e17) {
+            const char* bcol = remaining < 30.0 ? RED : (remaining < 90.0 ? YELLOW : DIM);
+            oss << "  " << bcol << "(" << format_time(std::max(0.0, remaining)) << " left)" << RESET;
+        }
+        oss << "    " << BOLD << "Signatures " << RESET
             << GREEN << valid << RESET << "/" << loaded
             << (skipped ? (std::string(RED) + " (" + std::to_string(skipped) + " skipped)" + RESET) : "");
         lines.push_back(row(oss.str()));
@@ -279,7 +287,10 @@ void TelemetryRenderer::render_dashboard() {
     {
         std::ostringstream oss;
         if (lattice_active) {
-            oss << "  " << DIM << "dim=" << tel_.lattice_dim.load()
+            int bs = tel_.current_block_size.load();
+            oss << "  " << DIM << "L=" << tel_.current_leak_l.load()
+                << (bs > 0 ? (" BKZ b=" + std::to_string(bs)) : " LLL")
+                << " dim=" << tel_.lattice_dim.load()
                 << " sigs=" << tel_.signatures_used.load() << RESET;
         } else if (fft_active) {
             oss << "  " << DIM << "FFT peak=" << std::fixed << std::setprecision(0)
@@ -354,6 +365,14 @@ void TelemetryRenderer::render_plain() {
 
     std::cout << "[" << format_time(elapsed) << "] valid=" << valid << "/" << loaded
               << " bias=" << bname << " ~" << std::fixed << std::setprecision(1) << leaked << "bits";
+    double remaining = tel_.remaining_budget_seconds();
+    if (remaining < 1e17) std::cout << " budget_left=" << format_time(std::max(0.0, remaining));
+    if (tel_.lattice_in_progress.load()) {
+        int bs = tel_.current_block_size.load();
+        std::cout << " L=" << tel_.current_leak_l.load()
+                   << (bs > 0 ? (" bkz_b=" + std::to_string(bs)) : " lll")
+                   << " dim=" << tel_.lattice_dim.load();
+    }
     if (!phase.empty()) std::cout << " phase=\"" << phase << "\"";
     std::cout << std::endl;
 }

@@ -203,26 +203,26 @@ BiasProfile BiasProfiler::profile(const std::vector<Pair>& pairs, Telemetry* tel
     if (msb_bits > 0.0 && msb_conf >= lsb_conf) {
         prof.type = BiasType::MSB;
         prof.estimated_leaked_bits = msb_bits;
-        prof.confidence_sigma = msb_conf;
+        prof.neg_log10_p = msb_conf;
         prof.bias_detected = true;
         prof.description = "Detected MSB bias (~" + std::to_string(prof.estimated_leaked_bits) +
-                            " bits; held-out significance p < 10^-" + std::to_string(prof.confidence_sigma) + ")";
+                            " bits; held-out significance p < 10^-" + std::to_string(prof.neg_log10_p) + ")";
     } else if (lsb_bits > 0.0) {
         prof.type = BiasType::LSB;
         prof.estimated_leaked_bits = lsb_bits;
-        prof.confidence_sigma = lsb_conf;
+        prof.neg_log10_p = lsb_conf;
         prof.bias_detected = true;
         prof.description = "Detected LSB bias (~" + std::to_string(prof.estimated_leaked_bits) +
-                            " known-zero low bits; held-out significance p < 10^-" + std::to_string(prof.confidence_sigma) + ")";
+                            " known-zero low bits; held-out significance p < 10^-" + std::to_string(prof.neg_log10_p) + ")";
     } else {
         prof.type = BiasType::NONE;
         prof.estimated_leaked_bits = 0;
-        prof.confidence_sigma = std::max(msb_conf, lsb_conf);
+        prof.neg_log10_p = std::max(msb_conf, lsb_conf);
     }
 
     if (telemetry) {
         telemetry->leaked_bits_est = prof.estimated_leaked_bits;
-        telemetry->confidence = prof.confidence_sigma;
+        telemetry->confidence = prof.neg_log10_p;
         telemetry->bias_type = static_cast<int>(prof.type);
     }
 
