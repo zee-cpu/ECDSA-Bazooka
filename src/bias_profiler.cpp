@@ -34,13 +34,14 @@ std::vector<Pair> sample_pairs(const std::vector<Pair>& pairs, size_t max_sample
 // stop working right at some other sample size or bias strength.
 const double TARGET_FALSE_POSITIVE_RATE = 1e-9;
 
-// Hard ceiling on the lattice-training sample size / dimension, matching
-// TRAIN_M_CAP in lattice_solver.cpp -- exact big-integer LLL was measured
-// to blow past any interactive time budget well before the dimension L=1
-// or L=2 would otherwise ask for (see HANDOFF.md, "weak bias support --
-// blocked"). L=1 is dropped from the default sweeps below entirely since
-// its true requirement (~320) is far past this cap; L=2 (~160) is kept as
-// best-effort only.
+// Hard ceiling on the detector's lattice-training sample size / dimension.
+// Detection deliberately uses only plain LLL (no BKZ escalation), so it can
+// only ever confirm bias it can resolve cheaply -- i.e. the strong/moderate
+// range (L>=7). Weak/mid bias (L<=6) is NOT detected here; it is recovered
+// blind via the FALLBACK path's BKZ sweep in lattice_solver.cpp instead. So
+// there is no point provisioning detection past what LLL can use: kept at
+// 120 to keep the common (strong-bias) detection fast. (The recovery cap is
+// separate and larger -- see lattice_solver.cpp.)
 constexpr size_t TRAIN_M_CAP = 120;
 
 // Shared detector core: for each candidate leak-bit value (ascending), build
@@ -100,14 +101,10 @@ std::pair<double, double> shrink_test_sweep(
     for (int L : leak_trials) {
         if (telemetry && telemetry->deadline_exceeded()) break;
 
-        // Each L needs roughly 320/L signatures for adequate margin (see
-        // TRAIN_M_CAP above and lattice_solver.cpp); weak bias needs a much
-        // bigger lattice, but sizing *every* trial for the weakest one in
-        // the sweep would needlessly slow down the common (stronger-bias)
-        // cases. A floor of 80 preserves the margin already validated for
-        // the L>=3 range; L=2 pushes past it and is capped at TRAIN_M_CAP
-        // (best-effort); L=1 is excluded from the caller's leak_trials list
-        // entirely since it would need ~320, far past the cap.
+        // Detection sizing: LLL-only, so this only needs enough dimension to
+        // confirm the strong/moderate range it can actually resolve. ~320/L
+        // floored at 80, capped at TRAIN_M_CAP (weak L is left to FALLBACK's
+        // BKZ recovery, not detected here -- see TRAIN_M_CAP note above).
         size_t train_m = std::min({train_pool.size(), TRAIN_M_CAP,
                           std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / L)))});
         if (train_m < 20) continue;

@@ -11,12 +11,12 @@
 
 RecoveryEngine::RecoveryEngine(Telemetry& tel) : tel_(tel) {}
 
-std::optional<mpz> RecoveryEngine::try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs) {
+std::optional<mpz> RecoveryEngine::try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint) {
     tel_.set_phase("Lattice recovery (Boneh-Venkatesan)");
     tel_.active_method = static_cast<int>(RecoveryMethod::LATTICE);
     tel_.method_chosen = true;
 
-    return LatticeSolver::recover_private_key(pairs, bias, max_sigs, &tel_);
+    return LatticeSolver::recover_private_key(pairs, bias, max_sigs, &tel_, pubkey_hint);
 }
 
 std::optional<mpz> RecoveryEngine::try_fft(const std::vector<Pair>& pairs, const BiasProfile& bias) {
@@ -55,7 +55,7 @@ std::optional<mpz> RecoveryEngine::try_fallback_ladder(const std::vector<Pair>& 
         fake.estimated_leaked_bits = 8.0;
 
         tel_.set_status(std::string("Fallback sweep (") + (t == BiasType::MSB ? "MSB" : "LSB") + ")");
-        auto cand = LatticeSolver::recover_private_key(pairs, fake, max_sigs ? max_sigs : 4000, &tel_);
+        auto cand = LatticeSolver::recover_private_key(pairs, fake, max_sigs ? max_sigs : 4000, &tel_, pubkey_hint);
         if (!cand.has_value()) continue;
 
         if (pubkey_hint > 0 && utils::verify_pubkey(*cand, pubkey_hint)) {
@@ -97,14 +97,14 @@ bool RecoveryEngine::dispatch_and_recover(
     };
 
     if (chosen == RecoveryMethod::LATTICE) {
-        candidate = try_lattice(pairs, profile, max_sigs);
+        candidate = try_lattice(pairs, profile, max_sigs, pubkey_hint);
         if (!verified(candidate) && !tel_.deadline_exceeded()) {
             // The profiler's chosen bias shape (MSB vs LSB) is itself a
             // heuristic call -- if it doesn't check out, try the other
             // shape before giving up rather than reporting failure outright.
             BiasProfile alt = profile;
             alt.type = (profile.type == BiasType::MSB) ? BiasType::LSB : BiasType::MSB;
-            auto alt_cand = try_lattice(pairs, alt, max_sigs);
+            auto alt_cand = try_lattice(pairs, alt, max_sigs, pubkey_hint);
             if (verified(alt_cand) || !candidate.has_value()) {
                 candidate = alt_cand;
             }

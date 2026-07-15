@@ -9,14 +9,21 @@
 using namespace fplll;
 
 // Hard ceiling on the lattice-training sample size (and therefore on
-// dimension, since dim = train_m + 1). Exact big-integer LLL was measured
-// to blow past any interactive time budget well before train_m=320 (needed
-// for L=1) or even train_m=161 (L=2) -- see HANDOFF.md ("weak bias support
-// -- blocked") for the timing data. Capping here means L=2 trials run at
-// reduced margin (best-effort, not guaranteed to resolve) and L=1 is
-// dropped from the default sweeps entirely below, rather than letting
-// either eat the whole time budget for a near-certain failure.
-constexpr size_t TRAIN_M_CAP = 120;
+// dimension, since dim = train_m + 1). The previous value (120) was set
+// around L=2's timing wall, but direct measurement later showed it was
+// silently strangling the *mid* range too: a real L=4 instance does not
+// resolve at dim 121 or 161, yet solves cleanly at dim 221 (block_size 30,
+// ~57s) and dim 301 (~102s). The practical dimension a leak level L needs
+// is roughly 3.5 * (256/L) -- well above the bare 256/L margin -- so the old
+// cap put L<=4 permanently out of reach for no reason other than the ceiling.
+// Raised to 320 so the Phase-2 plan below can provision the mid range
+// (L=4..6): L=5/L=6 resolve robustly at block 30, L=4 is best-effort with a
+// pair of dimension shots up to ~300. L<=3 needs both higher dimension *and*
+// a larger block size than block 30, so it stays out of reach; see HANDOFF.md
+// for the full frontier data. The time-budget guards further down still stop
+// any single trial that won't fit --max-time from starting, so a bigger
+// ceiling costs nothing when the budget is tight.
+constexpr size_t TRAIN_M_CAP = 320;
 
 namespace {
 
@@ -36,20 +43,26 @@ namespace {
 // still correct, unpruned) behavior if none of these paths exist, rather
 // than failing outright -- pruning is a speed optimization, not a
 // correctness requirement.
-std::vector<fplll::Strategy> load_bkz_pruning_strategies() {
-    static const std::vector<std::string> candidates = {
-        "/usr/local/share/fplll/strategies/default.json",
-        "/usr/share/fplll/strategies/default.json",
-        "/usr/share/libfplll8/strategies/default.json",
-    };
-    for (const auto& path : candidates) {
-        try {
-            return fplll::load_strategies_json(path);
-        } catch (const std::exception&) {
-            continue;
+// Cached: the JSON is parsed once on first use and reused. Phase 2 issues
+// several BKZ reductions per recovery, so re-reading the strategy file from
+// disk on every call (the old behaviour) was pointless I/O in a hot path.
+const std::vector<fplll::Strategy>& load_bkz_pruning_strategies() {
+    static const std::vector<fplll::Strategy> cached = []() {
+        static const std::vector<std::string> candidates = {
+            "/usr/local/share/fplll/strategies/default.json",
+            "/usr/share/fplll/strategies/default.json",
+            "/usr/share/libfplll8/strategies/default.json",
+        };
+        for (const auto& path : candidates) {
+            try {
+                return fplll::load_strategies_json(path);
+            } catch (const std::exception&) {
+                continue;
+            }
         }
-    }
-    return {};
+        return std::vector<fplll::Strategy>{};
+    }();
+    return cached;
 }
 
 } // namespace
@@ -139,8 +152,26 @@ bool LatticeSolver::build_boneh_venkatesan_basis(
     }
     mpz_set_ui(basis[n][n].get_data(), 1);
 
+    // Recentering (standard centered-HNP / Nguyen-Shparlinski trick). Without
+    // it, the target vector's residual coordinates are the raw nonces k_j,
+    // which are all *non-negative* and bounded by B = 2^(256-leaked_bits):
+    // uniform on [0, B), so E[k_j^2] = B^2/3. Subtracting the interval
+    // midpoint c = B/2 from each embedding constant t_j shifts those same
+    // coordinates to k_j - c in [-B/2, B/2), giving E[coord^2] = B^2/12 -- a
+    // 2x shorter target on the n dominant coordinates, i.e. one full bit of
+    // extra lattice margin, at zero cost: the determinant (N^n * M) is
+    // unchanged since it doesn't depend on the t-row values, so the gap
+    // lambda_2/lambda_1 improves by the same ~2x. That one bit is exactly the
+    // quantity that decides feasibility right at the L=2/L=3 threshold for
+    // 256-bit (dim ~ 256/L), where the target is otherwise only marginally
+    // shorter than the reduced-basis bulk. The k_0 column (col n) is left
+    // uncentered on purpose -- it is a single coordinate out of ~dim, so
+    // centering it too is negligible, and leaving col n untouched keeps
+    // reduce_and_extract's k_0 read (basis[row][k0_col]) valid unchanged.
+    mpz center = M >> 1;
     for (size_t c = 0; c < n; ++c) {
-        mpz_set(basis[n + 1][c].get_data(), t[c].get_mpz_t());
+        mpz shifted = t[c] - center;
+        mpz_set(basis[n + 1][c].get_data(), shifted.get_mpz_t());
     }
     mpz_set(basis[n + 1][n + 1].get_data(), M.get_mpz_t());
 
@@ -151,7 +182,8 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
     ZZ_mat<mpz_t>& basis,
     const std::vector<Pair>& pairs_in,
     Telemetry* telemetry,
-    int bkz_block_size
+    int bkz_block_size,
+    const mpz& pubkey_hint
 ) {
     if (basis.get_rows() == 0) return std::nullopt;
 
@@ -171,7 +203,9 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
         // load_bkz_pruning_strategies() above for why that matters as much
         // as it does (measured ~100x+ speedup at the same block size).
         if (telemetry) telemetry->set_phase("Running BKZ reduction (block size " + std::to_string(bkz_block_size) + ")");
-        auto strategies = load_bkz_pruning_strategies();
+        // Copy from the cached parse (BKZParam wants a mutable vector); the
+        // expensive part -- reading and parsing the JSON -- is cached.
+        std::vector<fplll::Strategy> strategies = load_bkz_pruning_strategies();
         int status;
         if (!strategies.empty()) {
             BKZParam param(bkz_block_size, strategies);
@@ -255,6 +289,21 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
         }
     }
 
+    // If we know the target public key, verify every extracted candidate
+    // against it directly and return the first match. This is the real
+    // correctness check (one scalar-mult each, trivial next to the reduction
+    // just done), so it must take precedence over the leading-zero scoring
+    // heuristic below -- otherwise the correct key, if present but not the
+    // top-scoring candidate, would be thrown away here and never reach the
+    // engine's verification step, which only ever sees this one return value.
+    if (pubkey_hint > 1) {
+        for (const auto& cand : candidates) {
+            if (utils::verify_pubkey(cand, pubkey_hint)) {
+                return cand;
+            }
+        }
+    }
+
     // Simple heuristic: prefer candidates that make many k "small"
     mpz best_cand(0);
     int best_score = -1;
@@ -292,7 +341,8 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     const std::vector<Pair>& pairs,
     const BiasProfile& bias,
     size_t max_signatures,
-    Telemetry* telemetry
+    Telemetry* telemetry,
+    const mpz& pubkey_hint
 ) {
     if (pairs.empty()) return std::nullopt;
 
@@ -308,36 +358,34 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     double leaked = bias.estimated_leaked_bits;
     if (leaked < 1.0) leaked = 8.0;
 
-    // Try a broad range of leak values, including very weak (1-2 bit)
-    // hard-bound bias. Phase B's estimate is only a rough point estimate
-    // -- sweep systematically around it rather than trusting it exactly.
-    // L=1 is deliberately absent from the candidate list below: its true
-    // requirement (train_m ~ 320, per the 320/L margin further down) is far
-    // past TRAIN_M_CAP, so a capped-dimension trial has no realistic chance
-    // of enough margin to resolve -- it would just spend budget on a
-    // near-guaranteed failure. L=2 stays in (needs ~160, also past the cap)
-    // as best-effort only; see HANDOFF.md for the full story.
-    std::vector<int> leak_trials;
+    // Recovery runs in two phases, because the leak levels split cleanly by
+    // what reduction they need (measured directly -- see HANDOFF.md frontier
+    // data):
+    //   * Strong/moderate bias (L>=7) resolves under plain LLL at modest
+    //     dimension in well under a second.
+    //   * The mid range (L=4..6) will NOT resolve under LLL at any dimension
+    //     -- it needs BKZ *and* a much larger lattice (L=4 needs dim ~221).
+    //   * Weak bias (L<=3) needs a still-larger block size than the
+    //     escalation ceiling grants and stays out of reach here.
+    // So Phase 1 is a fast, broad LLL sweep (catches the common case cheaply),
+    // and Phase 2 is a small, ordered BKZ sweep over just the mid range at
+    // full per-L dimension. Keeping Phase 2 small is deliberate: a broad
+    // high-dimension BKZ sweep would blow any realistic --max-time budget.
     int base_l = std::max(2, static_cast<int>(std::round(leaked)));
-    for (int cand : {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24, 2}) {
-        leak_trials.push_back(cand);
-    }
-    leak_trials.push_back(base_l);
-    leak_trials.push_back(base_l + 2);
-    leak_trials.push_back(std::max(2, base_l - 2));
 
     mpz best_cand(0);
     int best_score = -1;
     bool is_lsb = (bias.type == BiasType::LSB);
 
     if (telemetry) {
-        telemetry->total_attempts = leak_trials.size();
+        // 12 Phase-1 LLL trials + up to 4 Phase-2 BKZ trials (see below).
+        telemetry->total_attempts = 16;
         telemetry->current_attempt = 0;
     }
 
     // Score a candidate against the *original* (untransformed) pairs using
-    // a threshold derived from this trial's own leak value l -- shared by
-    // both the LLL and (if needed) BKZ escalation passes below.
+    // a threshold derived from this trial's own leak value l -- used only
+    // for the best-effort path when no pubkey is available to verify against.
     auto score_candidate = [&](const mpz& cand, int l) -> int {
         int score = 0;
         if (is_lsb) {
@@ -350,7 +398,12 @@ std::optional<mpz> LatticeSolver::recover_private_key(
                 else if (r < (mod >> 2)) score += 1;
             }
         } else {
-            int est = std::max(3, l);
+            // Threshold at the trial's own leak level. (Previously floored at
+            // 3, which under-scored a correct L=2 key -- half its nonces fall
+            // above 2^253 -- and made cross-L partial scores incomparable.
+            // Only matters on the no-pubkey best-effort path now that verified
+            // candidates short-circuit.)
+            int est = std::max(2, l);
             mpz thresh = mpz(1) << (256 - est);
             for (size_t i = 0; i < std::min<size_t>(used_pairs.size(), 20); ++i) {
                 mpz xd = utils::mod_mul(used_pairs[i].x, cand, SECP256K1_N);
@@ -363,150 +416,113 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     };
     int max_possible_score = static_cast<int>(std::min<size_t>(used_pairs.size(), 20)) * (is_lsb ? 3 : 5);
 
-    int best_partial_l = 0;
-    int best_partial_score = -1;
-
-    for (int l : leak_trials) {
-        if (telemetry && telemetry->deadline_exceeded()) break;
-        if (telemetry) telemetry->current_attempt = telemetry->current_attempt.load() + 1;
+    // Shared trial runner: build the lattice for leak level l on train_m
+    // pairs, reduce (LLL if block==0, else BKZ at that block size), and check
+    // the extracted candidates. Returns the key immediately if one verifies
+    // against the pubkey (definitive); otherwise records the best-scoring
+    // candidate for the no-pubkey best-effort path and returns nullopt.
+    auto run_trial = [&](int l, size_t train_m, int block) -> std::optional<mpz> {
         l = std::max(2, std::min(l, 24));
-
-        // Each L needs roughly 320/L signatures for adequate margin; weak
-        // bias (L=2) needs a much bigger lattice than the L>=3 range this
-        // was originally tuned for. Sized per-trial so cheap trials stay
-        // cheap -- only the weak ones pay the larger-dimension cost, up to
-        // TRAIN_M_CAP (see its definition for why the cap exists).
-        size_t train_m = std::min({use_count, TRAIN_M_CAP,
-                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / l)))});
-
-        // A single large-dimension LLL reduction can itself take minutes
-        // even at the capped dimension, and there's no way to interrupt
-        // fplll mid-call -- so skip *starting* a trial whose dimension
-        // suggests it won't fit what's left, rather than launching it and
-        // blowing past the deadline uncontrollably.
-        if (telemetry) {
-            double remaining = telemetry->remaining_budget_seconds();
-            if (train_m > 100 && remaining < 60.0) continue;
-        }
-
+        train_m = std::min(train_m, use_count);
+        if (train_m < 4) return std::nullopt;
         std::vector<Pair> train_pairs(pairs.begin(), pairs.begin() + train_m);
-
-        // For LSB bias, transform the pairs by 2^-l mod N before handing
-        // them to the (bias-shape-agnostic) MSB lattice machinery -- see
-        // utils::transform_pairs_lsb for why this is exact, not approximate.
+        // For LSB bias, transform by 2^-l mod N first -- see
+        // utils::transform_pairs_lsb for why that is exact, not approximate.
         std::vector<Pair> trial_pairs = is_lsb ? utils::transform_pairs_lsb(train_pairs, l) : train_pairs;
 
         ZZ_mat<mpz_t> basis;
         mpz scaling;
-        if (!build_boneh_venkatesan_basis(trial_pairs, l, basis, scaling)) {
-            continue;
-        }
+        if (!build_boneh_venkatesan_basis(trial_pairs, l, basis, scaling)) return std::nullopt;
 
         if (telemetry) {
+            telemetry->current_attempt = telemetry->current_attempt.load() + 1;
             telemetry->signatures_used = train_pairs.size();
             telemetry->current_leak_l = l;
-            telemetry->current_block_size = 0;  // plain LLL, not BKZ
+            telemetry->current_block_size = block;
             telemetry->lattice_in_progress = true;
-            telemetry->set_phase(std::string(is_lsb ? "Reducing LSB lattice (LLL) b=" : "Reducing lattice (LLL) l=") + std::to_string(l));
+            telemetry->set_phase((block > 0 ? "Reducing lattice (BKZ) l=" : "Reducing lattice (LLL) l=") + std::to_string(l));
         }
 
-        auto cand = reduce_and_extract(basis, trial_pairs, telemetry);
+        auto cand = reduce_and_extract(basis, trial_pairs, telemetry, block, pubkey_hint);
 
-        if (telemetry) {
-            telemetry->lattice_in_progress = false;
-        }
+        if (telemetry) telemetry->lattice_in_progress = false;
 
         if (cand.has_value() && *cand > 1 && *cand < SECP256K1_N - 1) {
+            // A pubkey-verified candidate is definitively correct -- accept
+            // immediately rather than trusting the leading-zero scoring
+            // heuristic (which can rank a wrong candidate above the right one).
+            if (pubkey_hint > 1 && utils::verify_pubkey(*cand, pubkey_hint)) return *cand;
             int score = score_candidate(*cand, l);
             if (score > best_score) {
                 best_score = score;
                 best_cand = *cand;
             }
-            // Track whichever L showed the strongest *partial* (but not
-            // fully convincing) signal, as the single best candidate for
-            // a BKZ retry below if the LLL sweep as a whole falls short.
-            if (score > 0 && score < max_possible_score && score > best_partial_score) {
-                best_partial_score = score;
-                best_partial_l = l;
-            }
         }
+        return std::nullopt;
+    };
 
-        // A fully convincing candidate is already overwhelming evidence
-        // of correctness -- stop here rather than continuing through the
-        // remaining trials, some of which (very weak bias, L=1,2) use a
-        // much larger, slower lattice and would otherwise run regardless
-        // of having already succeeded.
-        if (best_score >= max_possible_score && max_possible_score > 0) {
-            break;
+    // ---- Phase 1: fast LLL sweep over strong/moderate leak levels ----
+    // Deliberately modest dimension (<=120): strong bias resolves under LLL
+    // almost instantly, so this stays the cheap common path. Weak L will not
+    // resolve here -- that is Phase 2's job.
+    std::vector<int> lll_trials = {8, 10, 12, 7, 9, 11, 14, 16, 18, 20, 24};
+    lll_trials.push_back(base_l);
+    for (int l : lll_trials) {
+        if (telemetry && telemetry->deadline_exceeded()) break;
+        size_t train_m = std::min<size_t>({use_count, static_cast<size_t>(120),
+                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / std::max(1, l))))});
+        if (telemetry && train_m > 100 && telemetry->remaining_budget_seconds() < 30.0) continue;
+        auto found = run_trial(l, train_m, 0);
+        if (found) return *found;
+        // No pubkey to confirm against, but a maximal heuristic score is
+        // already overwhelming -- accept it as the best-effort answer.
+        if (pubkey_hint <= 1 && best_score >= max_possible_score && max_possible_score > 0
+            && best_cand > 1 && best_cand < SECP256K1_N - 1) {
+            return best_cand;
         }
     }
 
-    // BKZ escalation: bounded to at most ONE extra reduction, run only if
-    // the full LLL sweep above didn't already produce a convincing result
-    // (a clean maximal score is already overwhelming evidence of
-    // correctness, so there's nothing for a stronger reduction to
-    // improve on). Targets whichever L showed the strongest partial
-    // signal during the sweep -- the case LLL's precision was most
-    // plausibly just short of resolving -- rather than retrying every
-    // unresolved trial, which would multiply runtime across the whole
-    // sweep instead of a single targeted retry.
-    bool sweep_convincing = (best_score >= max_possible_score && max_possible_score > 0);
-    if (!sweep_convincing && best_partial_l > 0 && telemetry && !telemetry->deadline_exceeded()) {
-        size_t bkz_train_m = std::min({use_count, TRAIN_M_CAP,
-                              std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / best_partial_l)))});
-        std::vector<Pair> bkz_train_pairs(pairs.begin(), pairs.begin() + bkz_train_m);
-        std::vector<Pair> trial_pairs = is_lsb ? utils::transform_pairs_lsb(bkz_train_pairs, best_partial_l) : bkz_train_pairs;
+    // ---- Phase 2: focused BKZ sweep over the mid range (L=4..6) ----
+    // These provably do not resolve under LLL at any dimension; each needs a
+    // large per-L dimension AND a strong (block-30) BKZ reduction. The plan
+    // below is measured, not derived: at 256-bit, L=5 and L=6 resolve
+    // robustly at block 30 (both dims/seeds tested), so one shot each. L=4
+    // sits right at the edge of what block 30 can do -- it succeeds at some
+    // dimensions and misses at neighbouring ones for the same key (dim 221
+    // solves, 281 misses, 301 solves) -- so it gets two independent
+    // dimensions as a best-effort. L<=3 is deliberately absent: it needs
+    // block_size >= 40 at dim >= 450, which does not finish in 15+ minutes,
+    // and L<=2 does not converge at all in practice (see HANDOFF.md frontier
+    // data). Kept short on purpose -- a broad high-dimension BKZ sweep would
+    // blow any realistic --max-time. Early-returns the instant a candidate
+    // verifies against the pubkey.
+    //
+    // Note assuming a *smaller* L than the true bias is safe: the true nonce
+    // still satisfies the looser bound, so a low-L trial also recovers any
+    // stronger-bias data it happens to run against -- which is why this short
+    // plan covers the whole L>=4 mid range even from FALLBACK's fixed
+    // starting estimate.
+    struct BkzPlan { int l; size_t train_m; };
+    std::vector<BkzPlan> plan = {{6, 185}, {5, 225}, {4, 240}, {4, 300}};
+    // If detection pinned a specific weak level, try its matched trials first.
+    if (base_l >= 4 && base_l <= 6) {
+        std::stable_partition(plan.begin(), plan.end(),
+            [&](const BkzPlan& p) { return p.l == base_l; });
+    }
+    for (const auto& p : plan) {
+        if (telemetry && telemetry->deadline_exceeded()) break;
+        size_t train_m = std::min({p.train_m, use_count, TRAIN_M_CAP});
+        if (train_m < 120) continue; // too few signatures for a weak-bias lattice
+        int dim = static_cast<int>(train_m) + 1;
+        int block = std::min(dim - 1, 30);
 
-        ZZ_mat<mpz_t> basis_bkz;
-        mpz scaling_bkz;
-        if (build_boneh_venkatesan_basis(trial_pairs, best_partial_l, basis_bkz, scaling_bkz)) {
-            int dim = basis_bkz.get_rows();
-            // Half the dimension, capped at a practical ceiling -- BKZ
-            // cost grows steeply with block size well before that
-            // ceiling matters for the dimensions used here (~20-90).
-            int block_size = std::max(10, std::min(dim / 2, 30));
-            block_size = std::min(block_size, dim - 1);
+        // BKZ at these dimensions/block 30 measures ~35-120s; only start one
+        // that clearly fits the remaining budget (fplll can't be interrupted
+        // mid-call).
+        if (telemetry && telemetry->remaining_budget_seconds() < 130.0) continue;
 
-            // BKZ cost explodes with block size far faster than LLL scales
-            // with dimension. This was originally measured *before*
-            // reduce_and_extract loaded fplll's pruning strategy (see
-            // load_bkz_pruning_strategies() above): block_size 30 at
-            // dim~101 didn't finish in 120s unpruned, and a real recovery
-            // run hit ~85 minutes -- with --max-time given as only 180s.
-            // With pruning now enabled, the *same* block_size=30 at
-            // dim~121 (the largest this branch ever builds, since
-            // bkz_train_m is capped at TRAIN_M_CAP) measures ~11s, and
-            // block_size 12-24 all measure under 8s. Thresholds below are
-            // re-measured post-pruning with several x margin, not reused
-            // from the pre-pruning numbers -- those would now make this
-            // guard skip escalations that actually run in seconds. As with
-            // the LLL sweep's guard, this only stops *starting* an
-            // escalation that clearly won't fit -- fplll still can't be
-            // interrupted once a call is in flight.
-            double bkz_budget_needed =
-                block_size >= 25 ? 60.0 :
-                block_size >= 21 ? 45.0 :
-                block_size >= 17 ? 30.0 : 20.0;
-
-            if (telemetry->remaining_budget_seconds() >= bkz_budget_needed) {
-                telemetry->lattice_in_progress = true;
-                telemetry->signatures_used = trial_pairs.size();
-                telemetry->current_leak_l = best_partial_l;
-                telemetry->current_block_size = block_size;
-                telemetry->set_phase(std::string(is_lsb ? "Escalating to BKZ b=" : "Escalating to BKZ l=") + std::to_string(best_partial_l));
-
-                auto cand_bkz = reduce_and_extract(basis_bkz, trial_pairs, telemetry, block_size);
-                telemetry->lattice_in_progress = false;
-
-                if (cand_bkz.has_value() && *cand_bkz > 1 && *cand_bkz < SECP256K1_N - 1) {
-                    int score_bkz = score_candidate(*cand_bkz, best_partial_l);
-                    if (score_bkz > best_score) {
-                        best_score = score_bkz;
-                        best_cand = *cand_bkz;
-                    }
-                }
-            }
-        }
+        auto found = run_trial(p.l, train_m, block);
+        if (found) return *found;
     }
 
     if (best_cand > 1 && best_cand < SECP256K1_N - 1) {
