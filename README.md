@@ -26,16 +26,27 @@ list.
 
 ## Current capability
 
-- **MSB and LSB bias**: implemented and validated, including a BKZ
-  escalation path for cases plain LLL doesn't resolve cleanly.
+Recovery is by leak depth L (the number of biased high or low bits), for
+both MSB and LSB bias:
+
+- **L >= 5 bits: robustly recovered and validated.** Strong bias (L >= 7)
+  resolves under plain LLL in seconds; L = 5-6 use a focused BKZ pass (tens
+  of seconds to a couple of minutes).
+- **L = 4 bits: best-effort.** Recoverable, but right at the edge of what a
+  block-30 BKZ reduction can resolve at 256-bit, so it takes a few minutes
+  and two independent dimension attempts. Both test seeds recover; it is not
+  guaranteed for every key.
+- **L <= 3 bits: out of reach in practice.** L = 3 needs block_size >= 40 at
+  dimension >= 450 (> 15 min per attempt, no guarantee of convergence); L = 2
+  does not converge at feasible cost; L = 1 is out of scope entirely (a
+  genuine Fourier / Bleichenbacher attack there needs millions of same-key
+  signatures -- see De Mulder et al. CHES 2013, Osaki & Kunihiro SAC 2024,
+  Aranha et al. CCS 2020 -- which a wallet's on-chain history cannot supply).
 - **Modulo/Extended-HNP bias**: not implemented (`detect_modulo_bias` is a
   stub).
-- **Weak (1-2 bit) bias**: out of scope. Both the lattice/BKZ path and the
-  theoretical Fourier-analysis (Bleichenbacher) alternative were
-  investigated and hit hard, literature-confirmed walls at this bit depth
-  for realistic signature volumes (see De Mulder et al. CHES 2013, Osaki
-  & Kunihiro SAC 2024, Aranha et al. CCS 2020 on the signature-count cost
-  of Fourier-analysis attacks). **L>=3 bits is the tool's reliable floor.**
+
+Give weak-bias cases a generous `--max-time` (e.g. `-t 400`): the L = 4-6 BKZ
+pass is budget-gated and is skipped if it cannot fit the remaining time.
 
 ## Testing
 
