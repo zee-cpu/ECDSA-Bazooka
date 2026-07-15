@@ -33,8 +33,9 @@ list.
 - **Weak (1-2 bit) bias**: out of scope. Both the lattice/BKZ path and the
   theoretical Fourier-analysis (Bleichenbacher) alternative were
   investigated and hit hard, literature-confirmed walls at this bit depth
-  for realistic signature volumes -- see `HANDOFF.md` for the full
-  writeup and citations. **L>=3 bits is the tool's reliable floor.**
+  for realistic signature volumes (see De Mulder et al. CHES 2013, Osaki
+  & Kunihiro SAC 2024, Aranha et al. CCS 2020 on the signature-count cost
+  of Fourier-analysis attacks). **L>=3 bits is the tool's reliable floor.**
 
 ## Testing
 
@@ -59,7 +60,4 @@ ctest -R e2e_recovery                # slow (~5min): real recovery against real 
 
 ## More context
 
-- `HANDOFF.md` -- full project history: every bug found and fixed, what's
-  validated, and the investigation behind the weak-bias conclusion above.
-  Read this before making non-trivial changes.
 - `COMMANDS.md` -- complete CLI reference and build prerequisites.
