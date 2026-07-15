@@ -152,7 +152,7 @@ Whoever picks this up next should either give that e2e case an explicit
 to be run) or make the sweep itself bail out earlier when no candidate is
 looking convincing.
 
-## Current task: weak (1-2 bit) bias support -- BLOCKED, here's why
+## Weak (1-2 bit) bias support -- RESOLVED as out of scope, here's why
 
 Original plan was a genuine multi-stage Bleichenbacher/FFT refinement for
 very weak bias. That turned out to have a fundamental flaw, not a bug: for
@@ -255,8 +255,72 @@ reliable floor.
    Not ruled out entirely, but don't expect it to be the fix without
    testing it the same rigorous way as the above.
 
-Whichever you pick next: validate the same way everything else in this
-project was validated -- generate real ground-truth data
+### Why the obvious "next idea" (genuine Bleichenbacher/Fourier attack)
+### doesn't rescue this either -- checked against the published literature
+
+The natural next question, once lattice/BKZ hits a wall, is whether
+Bleichenbacher's Fourier-analysis-based HNP solver (the technique this
+project's *original*, since-abandoned `fft_solver.cpp` attempt was loosely
+modeled on, before the correlation-coherence flaw described above killed
+it) would do better if implemented correctly this time. Checked directly
+against the published literature rather than assumed:
+
+- Lattice attacks are the *cheap* option whenever they apply. De Mulder et
+  al. (CHES 2013, the paper that introduced a real, working Bleichenbacher
+  implementation) themselves note the lattice threshold scales with key
+  size: ~2 bits of leak suffices at 160-bit, ~3 bits at 256-bit, ~4 bits at
+  384-bit, solvable with "tens to thousands of signatures... in a few
+  minutes." For secp256k1 (256-bit), that puts the lattice/BKZ floor at
+  L=3 -- which matches this project's own empirical finding exactly (L>=3
+  reliable, L=1-2 blocked). This is independent, external confirmation
+  that the wall found above is real, not an artifact of this codebase.
+- Fourier analysis only becomes *necessary* below that threshold, and its
+  cost there is severe. Osaki & Kunihiro (SAC 2024), who directly measured
+  signature counts (not just estimated them), report needing 2^23-2^25
+  signatures (roughly 8-34 million) for a *131-bit* test curve at L=1-2 --
+  smaller and therefore easier than secp256k1's 256-bit. De Mulder et al.'s
+  own famous "4,000 signatures, 5-bit leak, 384-bit ECDSA" result is often
+  cited as proof Fourier methods are cheap, but 5 bits is already above the
+  384-bit lattice threshold -- that result was never actually testing the
+  hard L=1-2 regime, and the real L=1-2 numbers above are what should be
+  compared instead. Osaki & Kunihiro also note full Fourier attacks in
+  general run "from several days to a week" of compute even once the
+  signatures exist.
+- **The 8-34 million signature requirement is the actual blocker, not
+  compute.** Every published demonstration of this attack (Bleichenbacher's
+  original, De Mulder et al., LadderLeak, Takahashi et al., Osaki &
+  Kunihiro) targets a scenario where an attacker actively harvests
+  signatures from a live oracle (a smart card, a TLS/SSH server) with
+  effectively unlimited generation. This tool's actual input is a fixed
+  set of *real* historical signatures pulled from on-chain transaction
+  history for one wallet -- realistically dozens to low thousands, capped
+  by however many transactions that address ever made. No engineering
+  effort changes that ceiling; it's a property of the input data, not the
+  algorithm.
+
+**Conclusion: implementing genuine Bleichenbacher/Fourier analysis would
+not rescue L=1-2 for this tool.** It trades the BKZ block_size wall
+(section above) for a signature-count wall that's worse by 4-5 orders of
+magnitude and structurally unfixable given how this tool's input
+originates. L=1-2 bias recovery should be treated as **out of scope given
+realistic signature volumes**, not as a blocked engineering task waiting
+for the right algorithm. L>=3 is the tool's real, literature-confirmed
+floor. If a future case genuinely has millions of same-key signatures
+available (extremely unlikely for a wallet-recovery scenario, more
+plausible for e.g. a compromised signing server), Fourier analysis becomes
+worth revisiting -- but that's a different problem with a different data
+source than what this tool is built for, and would warrant its own
+from-scratch design rather than reviving `fft_solver.cpp`'s old approach.
+
+Sources: De Mulder, Hutter, Marson, Pearson, "Using Bleichenbacher's
+Solution to the Hidden Number Problem to Attack Nonce Leaks in 384-Bit
+ECDSA" (CHES 2013, eprint 2013/346); Osaki & Kunihiro, "Bias from Uniform
+Nonce: Revised Fourier Analysis-based Attack on ECDSA" (SAC 2024); Aranha
+et al., "LadderLeak: Breaking ECDSA With Less Than One Bit Of Nonce
+Leakage" (CCS 2020, eprint 2020/615).
+
+Whichever of items 1-3 above you revisit: validate the same way everything
+else in this project was validated -- generate real ground-truth data
 (`generate_mock_signatures.py` supports `--bias msb --bias-bits 1` etc.),
 run the actual binary, confirm against the printed ground-truth key. Don't
 declare something fixed on theory alone; this project's history is full of
