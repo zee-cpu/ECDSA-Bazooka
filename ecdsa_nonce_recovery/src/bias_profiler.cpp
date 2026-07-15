@@ -34,6 +34,15 @@ std::vector<Pair> sample_pairs(const std::vector<Pair>& pairs, size_t max_sample
 // stop working right at some other sample size or bias strength.
 const double TARGET_FALSE_POSITIVE_RATE = 1e-9;
 
+// Hard ceiling on the lattice-training sample size / dimension, matching
+// TRAIN_M_CAP in lattice_solver.cpp -- exact big-integer LLL was measured
+// to blow past any interactive time budget well before the dimension L=1
+// or L=2 would otherwise ask for (see HANDOFF.md, "weak bias support --
+// blocked"). L=1 is dropped from the default sweeps below entirely since
+// its true requirement (~320) is far past this cap; L=2 (~160) is kept as
+// best-effort only.
+constexpr size_t TRAIN_M_CAP = 120;
+
 // Shared detector core: for each candidate leak-bit value (ascending), build
 // the (possibly pre-transformed) HNP lattice on a small training subsample
 // and extract a candidate d using the same reduce_and_extract logic actual
@@ -67,17 +76,40 @@ std::pair<double, double> shrink_test_sweep(
     // sweep doesn't itself inflate the false-positive rate.
     double corrected_alpha = TARGET_FALSE_POSITIVE_RATE / std::max<size_t>(1, leak_trials.size());
 
+    // Partition ONCE into disjoint training and held-out pools. Previously
+    // train0/test_set/measure_set were each drawn independently from the
+    // *same* full `pairs` via sample_pairs, so for small inputs (test_n
+    // capped at 2000, measure_n at 5000, but pairs.size() often far
+    // smaller -- e.g. a real 59-signature file) the "held-out" set could
+    // equal the entire dataset, overlapping training completely. A
+    // candidate that overfits noise in a small training slice then gets
+    // re-tested partly against the exact points it was fit to, which can
+    // manufacture a spuriously tiny p-value for a candidate that is
+    // actually wrong (the same failure category as the tautological
+    // checks fixed elsewhere in this project's history -- see HANDOFF.md
+    // items 1 and 4 -- just resurfacing here via broken disjointness
+    // instead of an outright self-check). Splitting once up front and
+    // drawing every subsample from its own half guarantees zero overlap
+    // regardless of input size.
+    std::vector<Pair> shuffled = pairs;
+    std::shuffle(shuffled.begin(), shuffled.end(), rng);
+    size_t split = shuffled.size() / 2;
+    std::vector<Pair> train_pool(shuffled.begin(), shuffled.begin() + split);
+    std::vector<Pair> held_out_pool(shuffled.begin() + split, shuffled.end());
+
     for (int L : leak_trials) {
         if (telemetry && telemetry->deadline_exceeded()) break;
 
-        // Each L needs roughly 280/L signatures for adequate margin (see
-        // compute_dimension in lattice_solver.cpp); weak bias needs a much
+        // Each L needs roughly 320/L signatures for adequate margin (see
+        // TRAIN_M_CAP above and lattice_solver.cpp); weak bias needs a much
         // bigger lattice, but sizing *every* trial for the weakest one in
         // the sweep would needlessly slow down the common (stronger-bias)
         // cases. A floor of 80 preserves the margin already validated for
-        // the L>=3 range; only L=1,2 actually push past it.
-        size_t train_m = std::min<size_t>(pairs.size() / 2,
-                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / L))));
+        // the L>=3 range; L=2 pushes past it and is capped at TRAIN_M_CAP
+        // (best-effort); L=1 is excluded from the caller's leak_trials list
+        // entirely since it would need ~320, far past the cap.
+        size_t train_m = std::min({train_pool.size(), TRAIN_M_CAP,
+                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / L)))});
         if (train_m < 20) continue;
 
         // See the matching guard in lattice_solver.cpp: a single
@@ -86,11 +118,10 @@ std::pair<double, double> shrink_test_sweep(
         // won't fit the remaining budget rather than blowing past it.
         if (telemetry) {
             double remaining = telemetry->remaining_budget_seconds();
-            if (train_m > 150 && remaining < 150.0) continue;
             if (train_m > 100 && remaining < 60.0) continue;
         }
 
-        auto train0 = sample_pairs(pairs, train_m, rng);
+        auto train0 = sample_pairs(train_pool, train_m, rng);
         auto train = transform(train0, L);
 
         ZZ_mat<mpz_t> basis;
@@ -102,9 +133,11 @@ std::pair<double, double> shrink_test_sweep(
 
         // Use as much held-out data as available (capped for runtime) --
         // the significance test below is exact for whatever size we get,
-        // so there's no need to hand-tune it to a specific test_n.
-        size_t test_n = std::min(pairs.size(), static_cast<size_t>(2000));
-        auto test_set = sample_pairs(pairs, test_n, rng);
+        // so there's no need to hand-tune it to a specific test_n. Drawn
+        // from held_out_pool only -- disjoint from every training draw
+        // above, for any L in this sweep.
+        size_t test_n = std::min(held_out_pool.size(), static_cast<size_t>(2000));
+        auto test_set = sample_pairs(held_out_pool, test_n, rng);
 
         int count = 0;
         for (const auto& p : test_set) {
@@ -118,9 +151,10 @@ std::pair<double, double> shrink_test_sweep(
 
         if (p_value >= corrected_alpha) continue;
 
-        // Detected: now measure the actual magnitude directly from data.
-        size_t measure_n = std::min(pairs.size(), static_cast<size_t>(5000));
-        auto measure_set = sample_pairs(pairs, measure_n, rng);
+        // Detected: now measure the actual magnitude directly from data,
+        // again from the same disjoint held-out pool.
+        size_t measure_n = std::min(held_out_pool.size(), static_cast<size_t>(5000));
+        auto measure_set = sample_pairs(held_out_pool, measure_n, rng);
 
         std::vector<int> bits_observed;
         bits_observed.reserve(measure_set.size());
@@ -202,7 +236,10 @@ std::pair<double, double> BiasProfiler::detect_msb_bias(const std::vector<Pair>&
     if (pairs.size() < 20) return {0.0, 0.0};
 
     std::mt19937_64 rng(0xC0FFEEULL ^ static_cast<uint64_t>(pairs.size()));
-    static const std::vector<int> leak_trials = {3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 2, 1};
+    // L=1 excluded: see TRAIN_M_CAP comment above -- its ~320-signature
+    // requirement is far past the cap, so it has no realistic chance of
+    // resolving and would just burn the time budget.
+    static const std::vector<int> leak_trials = {3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 2};
 
     auto identity = [](const std::vector<Pair>& p, int) { return p; };
     // Leading-zero-bit count of k: for genuine MSB bias, every nonce has
@@ -228,7 +265,10 @@ std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>&
 
     std::mt19937_64 rng(0xBEEFULL ^ static_cast<uint64_t>(pairs.size()));
     std::vector<int> leak_trials;
-    for (int b : {3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 2, 1}) {
+    // L=1 excluded: see TRAIN_M_CAP comment above -- its ~320-signature
+    // requirement is far past the cap, so it has no realistic chance of
+    // resolving and would just burn the time budget.
+    for (int b : {3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 24, 2}) {
         if (b <= max_bits) leak_trials.push_back(b);
     }
     if (leak_trials.empty()) return {0.0, 0.0};

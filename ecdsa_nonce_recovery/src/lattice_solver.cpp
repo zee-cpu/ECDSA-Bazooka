@@ -8,6 +8,52 @@
 
 using namespace fplll;
 
+// Hard ceiling on the lattice-training sample size (and therefore on
+// dimension, since dim = train_m + 1). Exact big-integer LLL was measured
+// to blow past any interactive time budget well before train_m=320 (needed
+// for L=1) or even train_m=161 (L=2) -- see HANDOFF.md ("weak bias support
+// -- blocked") for the timing data. Capping here means L=2 trials run at
+// reduced margin (best-effort, not guaranteed to resolve) and L=1 is
+// dropped from the default sweeps entirely below, rather than letting
+// either eat the whole time budget for a near-certain failure.
+constexpr size_t TRAIN_M_CAP = 120;
+
+namespace {
+
+// fplll's plain bkz_reduction(basis, block_size, flags) convenience call
+// builds a BKZParam with an *empty* strategies vector -- fplll's own
+// BKZParam constructor then defaults every block to Strategy::EmptyStrategy,
+// whose PruningParams is documented in fplll's own source as "means no
+// pruning": every block runs full, unpruned, exhaustive enumeration, the
+// most expensive mode that exists. Measured directly against this project's
+// own lattice construction: block_size=30 at dim~161 (the weak-bias case
+// that motivated TRAIN_M_CAP above) never finished in 20 minutes unpruned;
+// loading fplll's own bundled, pre-tuned pruning strategy -- the same one
+// its command-line tool loads by default -- brought the identical instance
+// down to ~18 seconds. That's two orders of magnitude at the *same*
+// reduction strength, not a quality tradeoff, so there's no reason not to
+// use it whenever it's available. Falls back to empty (old, slower but
+// still correct, unpruned) behavior if none of these paths exist, rather
+// than failing outright -- pruning is a speed optimization, not a
+// correctness requirement.
+std::vector<fplll::Strategy> load_bkz_pruning_strategies() {
+    static const std::vector<std::string> candidates = {
+        "/usr/local/share/fplll/strategies/default.json",
+        "/usr/share/fplll/strategies/default.json",
+        "/usr/share/libfplll8/strategies/default.json",
+    };
+    for (const auto& path : candidates) {
+        try {
+            return fplll::load_strategies_json(path);
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return {};
+}
+
+} // namespace
+
 // HNP lattice embedding via pivot elimination + Kannan CVP->SVP embedding.
 //
 // The relation for each signature is k_i = w_i + x_i*d (mod N), with the
@@ -121,8 +167,18 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
         // the same delta, at significantly higher cost (roughly
         // exponential in block size), used only when LLL's result
         // doesn't already look convincing -- see recover_private_key.
+        // Uses fplll's bundled pruning strategy when available -- see
+        // load_bkz_pruning_strategies() above for why that matters as much
+        // as it does (measured ~100x+ speedup at the same block size).
         if (telemetry) telemetry->set_phase("Running BKZ reduction (block size " + std::to_string(bkz_block_size) + ")");
-        int status = bkz_reduction(basis, bkz_block_size, BKZ_DEFAULT);
+        auto strategies = load_bkz_pruning_strategies();
+        int status;
+        if (!strategies.empty()) {
+            BKZParam param(bkz_block_size, strategies);
+            status = bkz_reduction(&basis, nullptr, param);
+        } else {
+            status = bkz_reduction(basis, bkz_block_size, BKZ_DEFAULT);
+        }
         success = (status == RED_SUCCESS);
     } else {
         if (telemetry) telemetry->set_phase("Running LLL reduction");
@@ -255,14 +311,20 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     // Try a broad range of leak values, including very weak (1-2 bit)
     // hard-bound bias. Phase B's estimate is only a rough point estimate
     // -- sweep systematically around it rather than trusting it exactly.
+    // L=1 is deliberately absent from the candidate list below: its true
+    // requirement (train_m ~ 320, per the 320/L margin further down) is far
+    // past TRAIN_M_CAP, so a capped-dimension trial has no realistic chance
+    // of enough margin to resolve -- it would just spend budget on a
+    // near-guaranteed failure. L=2 stays in (needs ~160, also past the cap)
+    // as best-effort only; see HANDOFF.md for the full story.
     std::vector<int> leak_trials;
-    int base_l = std::max(1, static_cast<int>(std::round(leaked)));
-    for (int cand : {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24, 2, 1}) {
+    int base_l = std::max(2, static_cast<int>(std::round(leaked)));
+    for (int cand : {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24, 2}) {
         leak_trials.push_back(cand);
     }
     leak_trials.push_back(base_l);
     leak_trials.push_back(base_l + 2);
-    leak_trials.push_back(std::max(1, base_l - 2));
+    leak_trials.push_back(std::max(2, base_l - 2));
 
     mpz best_cand(0);
     int best_score = -1;
@@ -307,23 +369,23 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     for (int l : leak_trials) {
         if (telemetry && telemetry->deadline_exceeded()) break;
         if (telemetry) telemetry->current_attempt = telemetry->current_attempt.load() + 1;
-        l = std::max(1, std::min(l, 24));
+        l = std::max(2, std::min(l, 24));
 
         // Each L needs roughly 320/L signatures for adequate margin; weak
-        // bias (L=1,2) needs a much bigger lattice than the L>=3 range
-        // this was originally tuned for. Sized per-trial so cheap trials
-        // stay cheap -- only the weak ones pay the larger-dimension cost.
-        size_t train_m = std::min(use_count,
-                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / l))));
+        // bias (L=2) needs a much bigger lattice than the L>=3 range this
+        // was originally tuned for. Sized per-trial so cheap trials stay
+        // cheap -- only the weak ones pay the larger-dimension cost, up to
+        // TRAIN_M_CAP (see its definition for why the cap exists).
+        size_t train_m = std::min({use_count, TRAIN_M_CAP,
+                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / l)))});
 
         // A single large-dimension LLL reduction can itself take minutes
-        // (dim~320 measured at 2+ minutes), and there's no way to
-        // interrupt fplll mid-call -- so skip *starting* a trial whose
-        // dimension suggests it won't fit what's left, rather than
-        // launching it and blowing past the deadline uncontrollably.
+        // even at the capped dimension, and there's no way to interrupt
+        // fplll mid-call -- so skip *starting* a trial whose dimension
+        // suggests it won't fit what's left, rather than launching it and
+        // blowing past the deadline uncontrollably.
         if (telemetry) {
             double remaining = telemetry->remaining_budget_seconds();
-            if (train_m > 150 && remaining < 150.0) continue;
             if (train_m > 100 && remaining < 60.0) continue;
         }
 
@@ -388,8 +450,8 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     // sweep instead of a single targeted retry.
     bool sweep_convincing = (best_score >= max_possible_score && max_possible_score > 0);
     if (!sweep_convincing && best_partial_l > 0 && telemetry && !telemetry->deadline_exceeded()) {
-        size_t bkz_train_m = std::min(use_count,
-                              std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / best_partial_l))));
+        size_t bkz_train_m = std::min({use_count, TRAIN_M_CAP,
+                              std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / best_partial_l)))});
         std::vector<Pair> bkz_train_pairs(pairs.begin(), pairs.begin() + bkz_train_m);
         std::vector<Pair> trial_pairs = is_lsb ? utils::transform_pairs_lsb(bkz_train_pairs, best_partial_l) : bkz_train_pairs;
 
@@ -403,17 +465,40 @@ std::optional<mpz> LatticeSolver::recover_private_key(
             int block_size = std::max(10, std::min(dim / 2, 30));
             block_size = std::min(block_size, dim - 1);
 
-            telemetry->lattice_in_progress = true;
-            telemetry->set_phase(std::string(is_lsb ? "Escalating to BKZ b=" : "Escalating to BKZ l=") + std::to_string(best_partial_l));
+            // BKZ cost explodes with block size far faster than LLL scales
+            // with dimension. This was originally measured *before*
+            // reduce_and_extract loaded fplll's pruning strategy (see
+            // load_bkz_pruning_strategies() above): block_size 30 at
+            // dim~101 didn't finish in 120s unpruned, and a real recovery
+            // run hit ~85 minutes -- with --max-time given as only 180s.
+            // With pruning now enabled, the *same* block_size=30 at
+            // dim~121 (the largest this branch ever builds, since
+            // bkz_train_m is capped at TRAIN_M_CAP) measures ~11s, and
+            // block_size 12-24 all measure under 8s. Thresholds below are
+            // re-measured post-pruning with several x margin, not reused
+            // from the pre-pruning numbers -- those would now make this
+            // guard skip escalations that actually run in seconds. As with
+            // the LLL sweep's guard, this only stops *starting* an
+            // escalation that clearly won't fit -- fplll still can't be
+            // interrupted once a call is in flight.
+            double bkz_budget_needed =
+                block_size >= 25 ? 60.0 :
+                block_size >= 21 ? 45.0 :
+                block_size >= 17 ? 30.0 : 20.0;
 
-            auto cand_bkz = reduce_and_extract(basis_bkz, trial_pairs, telemetry, block_size);
-            telemetry->lattice_in_progress = false;
+            if (telemetry->remaining_budget_seconds() >= bkz_budget_needed) {
+                telemetry->lattice_in_progress = true;
+                telemetry->set_phase(std::string(is_lsb ? "Escalating to BKZ b=" : "Escalating to BKZ l=") + std::to_string(best_partial_l));
 
-            if (cand_bkz.has_value() && *cand_bkz > 1 && *cand_bkz < SECP256K1_N - 1) {
-                int score_bkz = score_candidate(*cand_bkz, best_partial_l);
-                if (score_bkz > best_score) {
-                    best_score = score_bkz;
-                    best_cand = *cand_bkz;
+                auto cand_bkz = reduce_and_extract(basis_bkz, trial_pairs, telemetry, block_size);
+                telemetry->lattice_in_progress = false;
+
+                if (cand_bkz.has_value() && *cand_bkz > 1 && *cand_bkz < SECP256K1_N - 1) {
+                    int score_bkz = score_candidate(*cand_bkz, best_partial_l);
+                    if (score_bkz > best_score) {
+                        best_score = score_bkz;
+                        best_cand = *cand_bkz;
+                    }
                 }
             }
         }

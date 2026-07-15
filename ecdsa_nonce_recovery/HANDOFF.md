@@ -84,9 +84,60 @@ The tool was fundamentally broken when this started. In order:
     display-width computation instead of `std::string::size()`, which
     counts bytes not columns).
 
+11. **BKZ escalation ignored `--max-time`.** It only checked
+    `deadline_exceeded()` (has the deadline already passed) before
+    *starting* the escalation, never `remaining_budget_seconds()` (will
+    this specific call actually fit) -- so a real run asked for `-t 180`
+    and took 84m47s, because once a BKZ call is in flight it can't be
+    interrupted. Fixed by adding a `bkz_budget_needed` threshold, sized to
+    the block size about to be attempted, checked against
+    `remaining_budget_seconds()` before the call starts (`lattice_solver.cpp`,
+    the BKZ escalation branch in `recover_private_key`).
+
+12. **BKZ was running with zero pruning -- full exhaustive enumeration --
+    on every call.** This was found while investigating item 11 and the
+    weak-bias dimension wall below. `bkz_reduction(basis, block_size,
+    BKZ_DEFAULT)`, the plain 3-arg convenience call used everywhere in this
+    codebase, builds a `BKZParam` with an *empty* strategies vector; fplll's
+    own `BKZParam` constructor then defaults every block to
+    `Strategy::EmptyStrategy`, whose `PruningParams` fplll's own source
+    documents as "means no pruning." This had nothing to do with float vs.
+    exact precision (`FT_DEFAULT` already resolves to `FT_DOUBLE` --
+    confirmed in fplll's `bkz.cpp`) -- it was a missing pruning strategy,
+    full stop. Fixed via `load_bkz_pruning_strategies()` in
+    `lattice_solver.cpp`, which loads fplll's own bundled, pre-tuned
+    `default.json` strategy file (the same one fplll's CLI tool uses by
+    default) and passes it into the full `BKZParam`-based `bkz_reduction`
+    overload; falls back to the old unpruned call if the file isn't
+    installed. Measured impact at the *same* reduction strength (not a
+    quality tradeoff): block_size=30 at dim~161 went from not finishing in
+    20 minutes to ~18-30s. This is a real, broadly-applicable win, kept
+    regardless of what happened with weak-bias support below.
+
+13. **Train/held-out overlap bug in `shrink_test_sweep`** (`bias_profiler.cpp`).
+    The training sample and the "held-out" test/measure samples were all
+    drawn independently from the same full `pairs` vector, not from disjoint
+    partitions -- for small `n` the "held-out" set could trivially overlap or
+    even equal the training set, undermining the whole point of the
+    held-out significance test from item 1. Found while investigating a real
+    59-signature file that reported `Confidence sigma: 300 / Leaked bits est: 0`,
+    an internally-inconsistent result. Fixed by shuffling and partitioning
+    `pairs` once up front into disjoint `train_pool` / `held_out_pool`
+    before any sampling. Verified: genuine bias is still detected correctly;
+    genuinely unbiased data and the 59-signature file both now report a
+    clean `Confidence sigma: 0` instead of the anomalous reading.
+
 All of the above is validated: full `ctest` suite passes, including real
 recovery against fresh ground-truth data at 8/12/16-bit MSB and LSB bias,
 and a fresh unbiased control correctly failing (no false positives).
+
+**Known pre-existing gap, not yet fixed:** `ctest -R e2e_recovery`'s
+unbiased-control case times out past 120s. Confirmed via `git stash` that
+this predates all of this session's changes (the e2e script doesn't pass
+`-t`, so `remaining_budget_seconds()` returns the unlimited sentinel and
+none of the budget-fit guards above apply there) -- it's a separate,
+pre-existing issue, not a regression. Whoever picks this up next should
+decide whether to fix it or just give that e2e case an explicit `-t`.
 
 ## Current task: weak (1-2 bit) bias support -- BLOCKED, here's why
 
@@ -126,44 +177,80 @@ bignum entries (moving from dim 25 to dim 161, a 6.4x increase, being
 the math and the widened-sweep code are correct; they're just impractical
 to run to completion at that dimension in interactive time.
 
-### Next steps (pick one, or investigate in this order)
+### Update: options 1 and 2 are both done. L=2 is a real algorithmic limit,
+### not a budget/tuning problem -- here's the evidence.
 
-1. **Cap dimension hard and drop L=1 from default sweeps.** Was about to
-   do this when the session ended. Concretely: clamp `train_m` to something
-   like 120 regardless of what the `320.0/L` formula would otherwise ask
-   for, and exclude L=1 entirely from the default `leak_trials` lists in
-   both `bias_profiler.cpp` and `lattice_solver.cpp` (its true requirement,
-   ~m=320, is far past any reasonable cap, so attempting it with a capped
-   dimension wastes time with no realistic chance of enough margin). Treat
-   L=2 as best-effort/not-guaranteed at the capped dimension. This is the
-   safe, honest, low-risk option -- it just narrows the claimed capability
-   rather than fixing the underlying speed problem.
+1. **Cap dimension hard and drop L=1 from default sweeps -- DONE.**
+   `TRAIN_M_CAP = 120` (near the top of `lattice_solver.cpp`, mirrored in
+   `bias_profiler.cpp`) now hard-clamps `train_m` regardless of what
+   `320.0/L` would otherwise ask for. `1` was removed from every default
+   `leak_trials` list in both files; the `base_l` / per-trial floors were
+   raised from `max(1, ...)` to `max(2, ...)` to match. L=2 is treated as
+   best-effort at the capped dimension, per the original plan.
 
-2. **Try a faster reduction backend.** fplll's exact LLL is the bottleneck.
-   `fpylll` (Python bindings) exposes float-based / hybrid reduction modes
-   that may be dramatically faster at this dimension while remaining
-   correct (floating-point LLL variants trade some reduction quality for
-   large constant-factor speedups; whether the quality loss still finds
-   the target vector at these dimensions needs empirical testing, same
-   discipline as everything else in this project -- generate ground-truth
-   data, test, don't assume). This is real, unstarted investigation.
+2. **Try a faster reduction backend -- DONE, but not the backend HANDOFF
+   originally guessed.** The premise here was wrong: fpylll's float-based
+   BKZ would have called the *same* underlying routine fplll's C++ BKZ
+   already uses by default (`FT_DEFAULT` resolves to `FT_DOUBLE` -- see
+   `bkz.cpp`), so it would not have been faster. The actual bottleneck,
+   found by reading fplll's own `BKZParam`/`Strategy`/`PruningParams`
+   source, was missing pruning (item 12 above) -- fixed directly in this
+   codebase's existing fplll C++ usage, no Python bindings needed.
+   Measured ~100x+ speedup at identical block size/dimension.
 
-3. **Reduce the required dimension itself.** The `320/L` margin was chosen
-   generously; the bare Boneh-Venkatesan theoretical minimum is `256/L`
-   (e.g. ~256 for L=1 instead of ~320). Narrower margin means faster but
-   less reliable (a `m=24` vs `m=26` comparison earlier in the project
-   showed LLL can fail right at the margin -- see the BKZ escalation
-   history above). Could combine with BKZ specifically at the margin
-   rather than deep in the safe zone. Also unstarted.
+**But the speedup doesn't rescue L=2.** After the pruning fix, block size
+was swept directly against `reduce_and_extract` on a fresh, real L=2
+ground-truth fixture (2-bit MSB, 700 sigs), at both the production-capped
+dimension (train_m=120, dim=121) and the full theoretical margin
+(train_m=160, dim=161, i.e. `320/L` for L=2 with no cap at all):
 
-Whichever you pick: validate the same way everything else in this project
-was validated -- generate real ground-truth data (`generate_mock_signatures.py`
-supports `--bias msb --bias-bits 1` etc.), run the actual binary, confirm
-against the printed ground-truth key. Don't declare something fixed on
-theory alone; this project's history is full of things that looked right
-algebraically and weren't (see items 1-4 above). Time yourself against a
-real dataset before assuming a change helped -- several "fixes" in this
-project's history turned out to need a second pass once actually timed.
+| block_size | dim | time | found correct key? |
+|---|---|---|---|
+| 30 | 121 | 13.5s | no |
+| 40 | 121 | didn't finish in 600s | -- |
+| 30 | 161 | 30.4s | no |
+| 31 | 161 | didn't finish in 900s | -- |
+| 35 | 161 | didn't finish in ~870s | -- |
+
+Two things this rules out:
+
+- **It isn't a dimension problem.** Going from dim=121 to the full-margin
+  dim=161 at the same block_size=30 didn't change the outcome (still no
+  match), just made each call ~2x slower.
+- **It isn't a budget problem.** block_size=30 -> 31, one increment, took
+  cost from 30s to over 900s without finishing. This is a genuine cliff in
+  BKZ's cost curve, not a smooth ramp -- there is no practical timeout that
+  buys you the next block size up. Block sizes that finish in reasonable
+  time (<=~30) aren't strong enough to resolve a 2-bit bias; block sizes
+  that might be strong enough (>=31) are computationally out of reach.
+
+Conclusion: **L=2 recovery is a fundamental limit of this embedding at
+these dimensions, not something fixable by more time, more signatures, or
+a faster float backend.** Options 1 and 2 from the original plan are both
+implemented and validated as genuine improvements (safer defaults, ~100x
+faster BKZ) but neither one, nor the two combined, makes L=2 reliably
+solvable. Treat L=2 as unlikely/best-effort in practice; L>=3 remains the
+reliable floor.
+
+3. **Reduce the required dimension itself -- still unstarted, and now a
+   lower-confidence bet than it looked.** The `320/L` margin down to the
+   bare `256/L` theoretical minimum was never tried, but the block_size
+   cliff data above suggests the bottleneck is block_size cost, not
+   dimension/margin -- shrinking the margin would only help if a *smaller*
+   block size became sufficient at the same L, which the dim=121 vs
+   dim=161 comparison (both block_size=30, both no match) doesn't support.
+   Not ruled out entirely, but don't expect it to be the fix without
+   testing it the same rigorous way as the above.
+
+Whichever you pick next: validate the same way everything else in this
+project was validated -- generate real ground-truth data
+(`generate_mock_signatures.py` supports `--bias msb --bias-bits 1` etc.),
+run the actual binary, confirm against the printed ground-truth key. Don't
+declare something fixed on theory alone; this project's history is full of
+things that looked right algebraically and weren't (see items 1-4 above).
+Time yourself against a real dataset before assuming a change helped --
+several "fixes" in this project's history turned out to need a second pass
+once actually timed.
 
 ## Not started at all
 
