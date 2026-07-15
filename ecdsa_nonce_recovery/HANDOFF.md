@@ -132,12 +132,25 @@ recovery against fresh ground-truth data at 8/12/16-bit MSB and LSB bias,
 and a fresh unbiased control correctly failing (no false positives).
 
 **Known pre-existing gap, not yet fixed:** `ctest -R e2e_recovery`'s
-unbiased-control case times out past 120s. Confirmed via `git stash` that
-this predates all of this session's changes (the e2e script doesn't pass
-`-t`, so `remaining_budget_seconds()` returns the unlimited sentinel and
-none of the budget-fit guards above apply there) -- it's a separate,
-pre-existing issue, not a regression. Whoever picks this up next should
-decide whether to fix it or just give that e2e case an explicit `-t`.
+unbiased-control case (`tests/e2e_recovery_test.sh`'s "unbiased data must
+NOT produce a false recovery" section) times out. Confirmed via `git
+stash` that this predates all of this session's changes -- the e2e
+script's own `timeout 120` wrapper doesn't pass `-t` to the binary, so
+`remaining_budget_seconds()` returns the unlimited sentinel and none of
+the budget-fit guards added this session apply there. It's a separate,
+pre-existing issue, not a regression, and it's still present after this
+session's fixes: re-checked directly (`timeout 130
+./build/ecdsa_nonce_recovery -i <800-sig unbiased fixture> -q`, no `-t`,
+same shape as the e2e script) and it was killed at 130s with zero output
+printed -- not close to finishing, not a borderline timing issue. The
+pruning speedup helps individual BKZ calls but the unbiased case has no
+correct answer to converge on, so it burns the entire (unbounded, no `-t`)
+leak-bit sweep across every trial, including the now-more-expensive-anyway
+L=2 attempts and its BKZ escalation, before ever reporting `[FAILURE]`.
+Whoever picks this up next should either give that e2e case an explicit
+`-t` (simplest fix, matches how every other case in the project is meant
+to be run) or make the sweep itself bail out earlier when no candidate is
+looking convincing.
 
 ## Current task: weak (1-2 bit) bias support -- BLOCKED, here's why
 
