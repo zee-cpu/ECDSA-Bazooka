@@ -86,6 +86,12 @@ add_executable(unit_tests tests/unit_tests.cpp)
 target_link_libraries(unit_tests PRIVATE ecdsa_recovery_core)
 target_compile_options(unit_tests PRIVATE ${ECDSA_WARNINGS})
 
+# Differential-test shim: prints d*G via this project's secp256k1 for the
+# Python driver to compare against the trusted `ecdsa` library.
+add_executable(ecc_diff_tool tests/ecc_diff_tool.cpp)
+target_link_libraries(ecc_diff_tool PRIVATE ecdsa_recovery_core)
+target_compile_options(ecc_diff_tool PRIVATE ${ECDSA_WARNINGS})
+
 # Install
 install(TARGETS ecdsa_nonce_recovery DESTINATION bin)
 
@@ -94,6 +100,14 @@ enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 30)
 add_test(NAME fplll_sanity COMMAND fplll_sanity_test)
+
+# Differential ECC test vs the trusted `ecdsa` Python library. Skips itself
+# (exit 0) if that library isn't installed, so it never blocks a build that
+# lacks the optional test dependency.
+add_test(NAME ecc_differential
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/ecc_differential_test.py
+            $<TARGET_FILE:ecc_diff_tool>)
+set_tests_properties(ecc_differential PROPERTIES TIMEOUT 180)
 
 # True end-to-end integration test: generates real biased/unbiased signature
 # data with known ground truth, runs the actual compiled binary, and checks

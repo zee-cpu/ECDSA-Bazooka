@@ -372,6 +372,41 @@ void test_input_validation_and_grouping() {
           "missing PubKey accepted best-effort with --allow-no-pubkey");
 }
 
+// ---------------------------------------------------------------------
+// secp256k1 point-arithmetic edge cases (Phase 4). Self-contained algebraic
+// invariants that don't need an external reference; the exhaustive random
+// cross-check against the `ecdsa` library lives in the ctest `ecc_differential`.
+// ---------------------------------------------------------------------
+void test_ec_point_arithmetic() {
+    std::cout << "-- secp256k1 point arithmetic edge cases (Phase 4) --\n";
+    using namespace secp256k1;
+    const Point O{mpz(0), mpz(0), true};
+
+    check(points_equal(point_add(G, O), G), "G + O == G (identity on the right)");
+    check(points_equal(point_add(O, G), G), "O + G == G (identity on the left)");
+
+    // Adding a point to its negation gives O.
+    Point negG{G.x, (P - G.y) % P, false};
+    check(point_add(G, negG).infinity, "G + (-G) == O");
+
+    // Doubling via add and via double must agree, and be on-curve.
+    Point dbl_add = point_add(G, G);
+    Point dbl_fn = point_double(G);
+    check(points_equal(dbl_add, dbl_fn), "point_add(G,G) == point_double(G)");
+    check(is_on_curve(dbl_fn), "2G is on the curve");
+
+    // Scalar-mult basics.
+    check(points_equal(scalar_mult(mpz(1), G), G), "1*G == G");
+    check(points_equal(scalar_mult(mpz(2), G), dbl_fn), "2*G == point_double(G)");
+    check(scalar_mult(mpz(0), G).infinity, "0*G == O");
+
+    // (n-1)*G == -G  (group order n), a strong end-of-range check.
+    Point n_minus_1_G = scalar_mult(N - 1, G);
+    check(points_equal(n_minus_1_G, negG), "(n-1)*G == -G");
+    // n*G == O.
+    check(scalar_mult(N, G).infinity, "n*G == O");
+}
+
 } // namespace
 
 int main() {
@@ -392,6 +427,8 @@ int main() {
     test_curve_membership();
     std::cout << "\n";
     test_input_validation_and_grouping();
+    std::cout << "\n";
+    test_ec_point_arithmetic();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

@@ -33,7 +33,11 @@ Point point_add(const Point& a, const Point& b) {
 
     mpz lambda;
     if (a.x == b.x && a.y == b.y) {
-        // doubling
+        // doubling. A point with y == 0 has order 2, so 2P = O; the a + (-a)
+        // check above already returns O for it (a.y + b.y == 0), so den = 2y
+        // is guaranteed nonzero here. Keep an explicit guard anyway so a future
+        // refactor of that check can't silently reintroduce a divide-by-zero.
+        if (a.y == 0) return {mpz(0), mpz(0), true};
         mpz num = 3 * a.x * a.x;          // 3x^2
         mpz den = 2 * a.y;
         lambda = (num * modinv(den, p)) % p;
@@ -56,7 +60,8 @@ Point point_double(const Point& a) {
     return point_add(a, a);
 }
 
-// Scalar multiplication (double-and-add)
+// Scalar multiplication (double-and-add). k == 0 (or k <= 0) yields O, the
+// identity, since the loop never runs.
 Point scalar_mult(const mpz& k, const Point& p) {
     Point result{mpz(0), mpz(0), true}; // O
     Point addend = p;
