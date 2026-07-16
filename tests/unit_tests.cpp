@@ -355,6 +355,61 @@ void test_repeated_nonce() {
 }
 
 // ---------------------------------------------------------------------
+// Known-nonzero-LSB recovery (Phase 6b). Generalizes LSB recovery from "low b
+// bits are zero" to "low b bits are a known value c" (side-channel leak model).
+// Correct recovery requires subtracting each nonce's known residue before the
+// LSB lattice transform; if the offset were ignored the transformed pairs would
+// be wrong and no key would verify.
+// ---------------------------------------------------------------------
+void test_known_lsb() {
+    std::cout << "-- known-nonzero-LSB recovery (Phase 6b) --\n";
+    const mpz d("0x0a1b2c3d4e5f60718293a4b5c6d7e8f9000102030405060708090a0b0c0d0e0f");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    // (1) Parser reads a well-formed KnownLow field and rejects an out-of-range one.
+    {
+        const std::string ok = "/tmp/test_knownlow_ok.txt";
+        { std::ofstream f(ok);
+          f << "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\n"
+            << "PubKey: " << pubkey.get_str(16) << "\nKnownLow: 8 0xab\n\n"; }
+        Telemetry t; auto s = SignatureParser::parse_file(ok, &t);
+        check(s.size() == 1 && s[0].known_low_bits == 8 && s[0].known_low_value == mpz(0xab),
+              "parser reads 'KnownLow: 8 0xab' as b=8, c=0xab");
+
+        const std::string bad = "/tmp/test_knownlow_bad.txt";
+        { std::ofstream f(bad);
+          f << "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\n"
+            << "PubKey: " << pubkey.get_str(16) << "\nKnownLow: 8 0x1ff\n\n"; }  // 0x1ff > 8 bits
+        Telemetry t2; auto b = SignatureParser::parse_file(bad, &t2);
+        check(b.empty(), "KnownLow value that overflows its bit width is rejected");
+    }
+
+    // (2) End-to-end recovery with a KNOWN, NONZERO, per-signature low-b-bit
+    // residue. High parts are kept small so the lattice is fast; what's under
+    // test is that the nonzero residue is folded in correctly.
+    const int b = 32;
+    const mpz two_b = mpz(1) << b;
+    std::mt19937_64 rng(0xC0FFEEULL);
+    std::vector<Signature> sigs;
+    for (size_t i = 1; i <= 40; ++i) {
+        mpz khigh = mpz(static_cast<unsigned long>(rng() % (1ull << 30))) + 1;  // k' small
+        mpz c     = mpz(static_cast<unsigned long>((rng() % (1ull << b)) | 1ull)); // c in [1, 2^b)
+        mpz k = khigh * two_b + c;                 // low b bits of k == c (nonzero)
+        Signature s = make_sig(d, mpz(2000 + i), k, pubkey, i);
+        s.known_low_bits = b;
+        s.known_low_value = c;
+        sigs.push_back(s);
+    }
+
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(sigs, &tel);
+    RecoveryEngine engine(tel);
+    RecoveryResult res = engine.run(sigs, pairs);
+    check(res.success, "known-nonzero-LSB set recovers a verified key");
+    check(res.private_key == d, "recovered key equals the true private key");
+}
+
+// ---------------------------------------------------------------------
 // Compressed SEC1 pubkey support. pubkey_to_point used to accept only the
 // uncompressed (0x04) form; a 33-byte compressed key (0x02/0x03 || x, y
 // recovered from the curve) was padded to 130 chars and rejected. Pin the
@@ -563,6 +618,8 @@ int main() {
     test_curve_membership();
     std::cout << "\n";
     test_repeated_nonce();
+    std::cout << "\n";
+    test_known_lsb();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

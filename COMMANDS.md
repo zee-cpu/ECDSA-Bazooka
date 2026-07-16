@@ -152,6 +152,28 @@ python3 scripts/generate_mock_signatures.py \
 [+] Ground-truth private key (exact for verification): 0x...
 ```
 
+### Optional: supplying known leaked nonce bits (side-channel data)
+
+Each signature block may carry an optional `KnownLow` field giving the *known*
+low bits of that signature's nonce `k` (e.g. recovered from a side channel):
+
+```
+Signature #1
+  R = ...
+  S = ...
+  Z = ...
+  PubKey: 04...
+  KnownLow: 8 0xab      # low 8 bits of k are known to be 0xab  (k ≡ 0xab mod 2^8)
+```
+
+Format is `KnownLow: <bits> <value_hex>`, with `1 ≤ bits ≤ 64` and
+`0 ≤ value < 2^bits`. When **every** signature in the file carries the same
+`bits` width, the tool skips statistical bias detection and recovers directly
+from the supplied constraint (generalizing the low-bits-are-zero case to any
+known residue). Partial or mixed-width annotation is ignored and the tool falls
+back to normal detection. As always, a reported key is verified against the
+PubKey, so a wrong leak simply fails to recover — it never yields a bad key.
+
 ## 6. Run the Recovery Tool
 
 ### Basic run (quiet — for logs/scripts)

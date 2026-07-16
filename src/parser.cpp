@@ -61,6 +61,20 @@ bool SignatureParser::validate_signature(Signature& sig) {
         sig.reject_reason = "PubKey is not a valid secp256k1 point";
         return false;
     }
+    // Phase 6b: if a known low-bit leak was supplied, it must be well-formed --
+    // a positive width no wider than the scalar, and a residue that actually
+    // fits in that width (0 <= value < 2^bits). We can't check it against the
+    // real nonce (k is secret), so a bad range is the only detectable error.
+    if (sig.known_low_bits != 0) {
+        if (sig.known_low_bits < 1 || sig.known_low_bits > 64) {
+            sig.reject_reason = "KnownLow bit width out of range [1, 64]";
+            return false;
+        }
+        if (sig.known_low_value < 0 || sig.known_low_value >= (mpz(1) << sig.known_low_bits)) {
+            sig.reject_reason = "KnownLow value does not fit in the given bit width";
+            return false;
+        }
+    }
     sig.reject_reason.clear();
     return true;
 }
@@ -88,6 +102,26 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
         } else if (l.find("PubKey") == 0) {
             size_t c = l.find(':');
             if (c != std::string::npos) { pk_seen = true; pk_ok = parse_hex_to_mpz(trim(l.substr(c + 1)), sig.pubkey, MAX_PUBKEY_HEX); }
+        } else if (l.find("KnownLow") == 0) {
+            // Phase 6b: known leaked low bits of this signature's nonce, from a
+            // side channel. Format: "KnownLow: <bits> <value_hex>", e.g.
+            // "KnownLow: 8 0xab" meaning k ≡ 0xab (mod 2^8). Range-checked in
+            // validate_signature; a malformed field leaves the default (none).
+            size_t c = l.find(':');
+            if (c != std::string::npos) {
+                std::istringstream ks(trim(l.substr(c + 1)));
+                std::string bstr, vstr;
+                if (ks >> bstr >> vstr) {
+                    mpz v;
+                    try {
+                        int b = std::stoi(bstr);
+                        if (parse_hex_to_mpz(vstr, v, MAX_SCALAR_HEX)) {
+                            sig.known_low_bits = b;
+                            sig.known_low_value = v;
+                        }
+                    } catch (...) {}
+                }
+            }
         } else if (l.find("TXID") == 0) {
             size_t c = l.find(':');
             if (c != std::string::npos) sig.txid = trim(l.substr(c + 1));

@@ -416,9 +416,14 @@ std::optional<mpz> LatticeSolver::recover_private_key(
             for (size_t i = 0; i < std::min<size_t>(used_pairs.size(), 20); ++i) {
                 mpz xd = utils::mod_mul(used_pairs[i].x, cand, SECP256K1_N);
                 mpz k = utils::mod_add(used_pairs[i].w, xd, SECP256K1_N);
-                mpz r = k % mod;
-                if (r == 0) score += 3;
-                else if (r < (mod >> 2)) score += 1;
+                // A correct key reproduces each nonce's known low-bit residue.
+                // For the default LSB-zero case known_low_value is 0, so this
+                // is exactly the original "low l bits are zero" test.
+                mpz expected = used_pairs[i].known_low_value % mod;
+                mpz diff = (k % mod - expected) % mod;
+                if (diff < 0) diff += mod;
+                if (diff == 0) score += 3;
+                else if (diff < (mod >> 2)) score += 1;
             }
         } else {
             // Threshold at the trial's own leak level. (Previously floored at

@@ -46,6 +46,11 @@ namespace utils {
     // bias in k' (k' is bounded exactly like an MSB-biased nonce with
     // the same bit count), so the existing MSB machinery can be reused
     // unchanged on the transformed pairs.
+    //
+    // Phase 6b generalizes this to a known nonzero low-bit residue c
+    // (k ≡ c mod 2^b, carried per-pair in Pair::known_low_value): k - c is
+    // the exact multiple of 2^b, so w' = (w - c)*inv(2^b) mod N. c = 0 (the
+    // default) is exactly the LSB-zero case above.
     std::vector<Pair> transform_pairs_lsb(const std::vector<Pair>& pairs, int b);
 
     // Exact Poisson upper-tail P(X >= k) for X ~ Poisson(lambda), by direct

@@ -9,6 +9,26 @@
 #include <optional>
 #include <vector>
 
+namespace {
+    // Phase 6b: the shared known-low-bit width if EVERY valid signature carries
+    // the same one, else 0. Requiring all valid sigs to be annotated (no zeros
+    // mixed in) is deliberate -- an un-annotated pair would be misread as "low
+    // bits == 0" and corrupt the lattice, so partial annotation disables the
+    // known-LSB path and we fall back to statistical detection.
+    int uniform_known_low_bits(const std::vector<Signature>& sigs) {
+        int b = 0;
+        bool any = false;
+        for (const auto& s : sigs) {
+            if (!s.valid) continue;
+            any = true;
+            if (s.known_low_bits <= 0) return 0;
+            if (b == 0) b = s.known_low_bits;
+            else if (s.known_low_bits != b) return 0;
+        }
+        return any ? b : 0;
+    }
+}
+
 RecoveryEngine::RecoveryEngine(Telemetry& tel) : tel_(tel) {}
 
 std::optional<mpz> RecoveryEngine::try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint) {
@@ -213,9 +233,27 @@ RecoveryResult RecoveryEngine::run(
         result.bias_profile.description =
             "Reused nonce (r-collision) -- recovered by closed-form algebra, no lattice";
     } else {
-        // Profile
-        tel_.set_phase("Profiling bias");
-        BiasProfile profile = BiasProfiler::profile(pairs, &tel_);
+        BiasProfile profile;
+        int known_bits = uniform_known_low_bits(signatures);
+        if (known_bits > 0) {
+            // Phase 6b: the leak is *supplied*, not detected. Build the profile
+            // directly and let the lattice use each pair's known low-bit residue
+            // (Pair::known_low_value, folded in by transform_pairs_lsb). This is
+            // the side-channel model: known bits are exact, so we skip the
+            // statistical detector entirely rather than re-discovering them.
+            profile.type = BiasType::LSB;
+            profile.estimated_leaked_bits = static_cast<double>(known_bits);
+            profile.bias_detected = true;
+            profile.description = "known-LSB: " + std::to_string(known_bits) +
+                " leaked low bit(s) supplied per signature";
+            tel_.set_phase("Known-LSB recovery");
+            tel_.leaked_bits_est = static_cast<double>(known_bits);
+            tel_.bias_type = static_cast<int>(BiasType::LSB);
+        } else {
+            // Profile
+            tel_.set_phase("Profiling bias");
+            profile = BiasProfiler::profile(pairs, &tel_);
+        }
 
         bool dispatch_ok = dispatch_and_recover(profile, pairs, force_method, max_sigs, pubkey_hint, result);
 

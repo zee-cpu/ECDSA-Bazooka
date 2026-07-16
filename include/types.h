@@ -34,6 +34,14 @@ struct Signature {
     // input record rather than a silent skip.
     size_t index = 0;
     std::string reject_reason;
+    // Phase 6b: known leaked low bits of this signature's nonce (e.g. from a
+    // side channel). known_low_bits == 0 means "none supplied" -- the default,
+    // which leaves behaviour identical to before. When > 0, the nonce is known
+    // to satisfy k ≡ known_low_value (mod 2^known_low_bits), and recovery uses
+    // that as an exact constraint (generalizing the LSB-zero case to a known
+    // nonzero residue). 0 <= known_low_value < 2^known_low_bits.
+    int known_low_bits = 0;
+    mpz known_low_value = 0;
 };
 
 // Computed (w, x) pair
@@ -43,6 +51,11 @@ struct Pair {
     // Index of the Signature this pair was derived from (see Signature::index),
     // preserved so a recovery/verification failure can name the source record.
     size_t source_index = 0;
+    // Phase 6b: known low-bit residue of this pair's nonce (see
+    // Signature::known_low_value). 0 both for the default no-leak case and for
+    // a genuine leaked value of 0, which are treated identically -- subtracting
+    // 0 is a no-op, so the LSB transform reduces to the original LSB-zero form.
+    mpz known_low_value = 0;
 };
 
 // Bias profile returned by profiler

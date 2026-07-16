@@ -103,8 +103,16 @@ std::vector<Pair> transform_pairs_lsb(const std::vector<Pair>& pairs, int b) {
     out.reserve(pairs.size());
     for (const auto& p : pairs) {
         Pair tp;
-        tp.w = mod_mul(p.w, inv2b, N);
+        // Phase 6b generalization: for a known low-bit residue c (k ≡ c mod
+        // 2^b), k - c is the exact multiple of 2^b, so subtract c from w first.
+        // k' = (k - c)/2^b = 2^-b*(w - c) + 2^-b*x*d (mod N). c defaults to 0,
+        // recovering the original LSB-zero transform (k' = 2^-b*w + ...).
+        mpz w_shifted = (p.w - p.known_low_value) % N;
+        if (w_shifted < 0) w_shifted += N;
+        tp.w = mod_mul(w_shifted, inv2b, N);
         tp.x = mod_mul(p.x, inv2b, N);
+        // The transformed pair describes k' directly, which carries no further
+        // known low bits, so the offset does not propagate.
         out.push_back(tp);
     }
     return out;

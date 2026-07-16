@@ -28,6 +28,7 @@ std::vector<Pair> PairComputer::compute_pairs(const std::vector<Signature>& sigs
         p.w = w;
         p.x = x;
         p.source_index = sig.index;  // preserve provenance to the source record
+        p.known_low_value = sig.known_low_value;  // Phase 6b: carry any leaked low bits
         pairs.push_back(p);
 
         ++processed;
