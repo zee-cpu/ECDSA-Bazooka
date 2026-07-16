@@ -1,5 +1,7 @@
 # ECDSA Nonce-Bias Recovery Tool
 
+[![CI](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml/badge.svg)](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml)
+
 Given a set of real ECDSA signatures from the same private key where the nonce
 (`k`) has some kind of statistical bias (MSB, LSB, or weak/soft bias), detect
 the bias and recover the private key. Core approach: eliminate the private key
