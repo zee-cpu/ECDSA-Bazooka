@@ -72,7 +72,20 @@ Point scalar_mult(const mpz& k, const Point& p) {
     return result;
 }
 
+bool is_on_curve(const Point& pt) {
+    if (pt.infinity) return false;
+    // Field-membership: reject coordinates outside [0, P). Without this an
+    // attacker-supplied pubkey could carry out-of-range coordinates that
+    // happen to satisfy the reduced curve equation only after reduction.
+    if (pt.x < 0 || pt.x >= P || pt.y < 0 || pt.y >= P) return false;
+    // secp256k1: y^2 == x^3 + 7 (mod P). (a = 0, b = 7.)
+    mpz lhs = (pt.y * pt.y) % P;
+    mpz rhs = (((pt.x * pt.x) % P) * pt.x + 7) % P;
+    return lhs == rhs;
+}
+
 std::optional<Point> pubkey_to_point(const mpz& pubkey_mpz) {
+    if (pubkey_mpz <= 0) return std::nullopt;
     std::string hex = pubkey_mpz.get_str(16);
 
     // GMP's get_str never prints insignificant leading zero hex digits.
@@ -97,7 +110,12 @@ std::optional<Point> pubkey_to_point(const mpz& pubkey_mpz) {
     x.set_str(xhex, 16);
     y.set_str(yhex, 16);
 
-    return Point{x, y, false};
+    // Reject off-curve / out-of-field points instead of trusting the encoding.
+    // A malformed or attacker-supplied pubkey that parses structurally but is
+    // not a real curve point must never be accepted as a recovery target.
+    Point pt{x, y, false};
+    if (!is_on_curve(pt)) return std::nullopt;
+    return pt;
 }
 
 mpz point_to_pubkey(const Point& p) {

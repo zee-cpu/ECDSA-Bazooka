@@ -75,6 +75,7 @@ add_executable(unit_tests
     src/secp256k1.cpp
     src/verifier.cpp
     src/lattice_solver.cpp
+    src/parser.cpp
 )
 
 target_include_directories(unit_tests PRIVATE

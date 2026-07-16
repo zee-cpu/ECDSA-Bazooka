@@ -24,12 +24,21 @@ struct Signature {
     std::string txid;
     int64_t timestamp;
     bool valid = false;
+    // Provenance + diagnostics (Phase 2 input-integrity boundary): the
+    // 1-based position of this block in the source file, and, when invalid,
+    // a human-readable reason so failures can be reported against the exact
+    // input record rather than a silent skip.
+    size_t index = 0;
+    std::string reject_reason;
 };
 
 // Computed (w, x) pair
 struct Pair {
     mpz w;  // = z * s^{-1} mod n
     mpz x;  // = r * s^{-1} mod n
+    // Index of the Signature this pair was derived from (see Signature::index),
+    // preserved so a recovery/verification failure can name the source record.
+    size_t source_index = 0;
 };
 
 // Bias profile returned by profiler

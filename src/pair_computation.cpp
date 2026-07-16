@@ -27,6 +27,7 @@ std::vector<Pair> PairComputer::compute_pairs(const std::vector<Signature>& sigs
         Pair p;
         p.w = w;
         p.x = x;
+        p.source_index = sig.index;  // preserve provenance to the source record
         pairs.push_back(p);
 
         ++processed;

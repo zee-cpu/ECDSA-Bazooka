@@ -20,6 +20,8 @@ static void print_usage(const char* prog) {
     std::cout << "  -t, --max-time SEC     Max time budget (seconds)\n";
     std::cout << "  -v, --verbose          Enable live telemetry dashboard\n";
     std::cout << "  -q, --quiet            Disable live updates (for logs)\n";
+    std::cout << "      --allow-no-pubkey  Permit best-effort recovery when signatures\n";
+    std::cout << "                         lack a PubKey (result cannot be verified)\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -39,7 +41,9 @@ int main(int argc, char** argv) {
     double max_time = 0.0;
     bool verbose = true;
     bool quiet = false;
+    bool allow_no_pubkey = false;
 
+    enum { OPT_ALLOW_NO_PUBKEY = 1000 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -47,6 +51,7 @@ int main(int argc, char** argv) {
         {"max-time", required_argument, 0, 't'},
         {"verbose", no_argument, 0, 'v'},
         {"quiet", no_argument, 0, 'q'},
+        {"allow-no-pubkey", no_argument, 0, OPT_ALLOW_NO_PUBKEY},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -74,6 +79,9 @@ int main(int argc, char** argv) {
             case 'q':
                 quiet = true;
                 verbose = false;
+                break;
+            case OPT_ALLOW_NO_PUBKEY:
+                allow_no_pubkey = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -106,11 +114,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "[+] Parsed " << signatures.size() << " signatures (" 
+    std::cout << "[+] Parsed " << signatures.size() << " signatures ("
               << telemetry.signatures_valid.load() << " valid)\n";
 
-    // Compute pairs
-    auto pairs = PairComputer::compute_pairs(signatures, &telemetry);
+    // Input-integrity boundary: enforce a single public key and the
+    // missing-pubkey policy before any expensive work begins.
+    ValidatedGroup group = SignatureParser::validate_and_group(signatures, allow_no_pubkey);
+    if (!group.ok) {
+        std::cerr << "[input] REJECTED: " << group.error << "\n";
+        return 1;
+    }
+    std::cout << "[+] Input policy: " << group.policy << "\n";
+
+    // Compute pairs (from the validated, single-key group)
+    auto pairs = PairComputer::compute_pairs(group.signatures, &telemetry);
     std::cout << "[+] Computed " << pairs.size() << " (w, x) pairs\n";
 
     if (pairs.empty()) {
@@ -130,9 +147,9 @@ int main(int argc, char** argv) {
         telemetry.set_phase("Running (no live UI)");
     }
 
-    // Run recovery
+    // Run recovery (on the validated single-key group)
     RecoveryResult res = engine.run(
-        signatures,
+        group.signatures,
         pairs,
         force_method,
         max_sigs,

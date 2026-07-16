@@ -10,6 +10,7 @@
 #include "secp256k1.h"
 #include "verifier.h"
 #include "lattice_solver.h"
+#include "parser.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -256,6 +257,121 @@ void test_lattice_basis_construction() {
     check(basis.get_cols() == m + 1, "basis is square");
 }
 
+// ---------------------------------------------------------------------
+// secp256k1 curve membership (Phase 2 pubkey gate). A malformed, off-curve,
+// or out-of-field pubkey must never be accepted as a recovery target -- this
+// is the check that used to be entirely absent.
+// ---------------------------------------------------------------------
+void test_curve_membership() {
+    std::cout << "-- secp256k1 curve membership (Phase 2 pubkey gate) --\n";
+    using namespace secp256k1;
+
+    check(is_on_curve(G), "generator G is on the curve");
+
+    Point off = G; off.y = (off.y + 1) % P;
+    check(!is_on_curve(off), "point with y+1 is rejected (off curve)");
+
+    Point inf{mpz(0), mpz(0), true};
+    check(!is_on_curve(inf), "point at infinity is not a valid pubkey");
+
+    Point oob = G; oob.x = P;  // x == field prime is outside [0, P)
+    check(!is_on_curve(oob), "coordinate == field prime P is rejected (out of field)");
+
+    // A real uncompressed pubkey parses to d*G; an off-curve re-encoding is rejected.
+    mpz d("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    mpz pk = utils::compute_pubkey(d);
+    auto pt = pubkey_to_point(pk);
+    check(pt.has_value(), "valid uncompressed pubkey parses to a point");
+    if (pt.has_value())
+        check(points_equal(*pt, scalar_mult(d, G)), "parsed pubkey equals d*G");
+
+    Point badpt = *pt; badpt.y = (badpt.y + 1) % P;
+    mpz badpk = point_to_pubkey(badpt);
+    check(!pubkey_to_point(badpk).has_value(),
+          "off-curve pubkey (y+1) is rejected by pubkey_to_point");
+}
+
+// ---------------------------------------------------------------------
+// Parser input-integrity boundary (Phase 2): scalar-range and malformed-field
+// rejection with actionable reasons, and the single-key grouping / missing-
+// pubkey policy. Replaces the old "r,s != 0" rubber stamp.
+// ---------------------------------------------------------------------
+void test_input_validation_and_grouping() {
+    std::cout << "-- parser input-integrity boundary (Phase 2) --\n";
+
+    const mpz d("0x1111111111111111111111111111111111111111111111111111111111111111");
+    const std::string pk_hex = utils::compute_pubkey(d).get_str(16);
+
+    auto block = [&](const std::string& r, const std::string& s,
+                     const std::string& z, const std::string& pk) {
+        std::string b = "Signature #1\n";
+        if (!r.empty()) b += "R = " + r + "\n";
+        if (!s.empty()) b += "S = " + s + "\n";
+        if (!z.empty()) b += "Z = " + z + "\n";
+        if (!pk.empty()) b += "PubKey: " + pk + "\n";
+        return b;
+    };
+    auto has = [](const std::string& hay, const std::string& needle) {
+        return hay.find(needle) != std::string::npos;
+    };
+
+    // Well-formed block accepted.
+    auto ok = SignatureParser::parse_block(block("1", "2", "abc", pk_hex));
+    check(ok.has_value() && ok->valid, "well-formed signature block is accepted");
+
+    // r = 0 and r >= n rejected with an actionable reason.
+    auto r0 = SignatureParser::parse_block(block("0", "2", "abc", pk_hex));
+    check(r0.has_value() && !r0->valid && has(r0->reject_reason, "r out of range"),
+          "r = 0 rejected: '" + (r0 ? r0->reject_reason : std::string()) + "'");
+    std::string n_hex = SECP256K1_N.get_str(16);
+    auto rn = SignatureParser::parse_block(block(n_hex, "2", "abc", pk_hex));
+    check(rn.has_value() && !rn->valid && has(rn->reject_reason, "r out of range"),
+          "r = n rejected (>= curve order)");
+
+    // Malformed / missing fields named specifically.
+    auto badr = SignatureParser::parse_block(block("xyz", "2", "abc", pk_hex));
+    check(badr.has_value() && !badr->valid && has(badr->reject_reason, "malformed R"),
+          "non-hex R rejected as malformed");
+    auto over = SignatureParser::parse_block(block(std::string(65, 'a'), "2", "abc", pk_hex));
+    check(over.has_value() && !over->valid && has(over->reject_reason, "malformed R"),
+          "over-length R (65 hex digits) rejected");
+    auto noz = SignatureParser::parse_block(block("1", "2", "", pk_hex));
+    check(noz.has_value() && !noz->valid && has(noz->reject_reason, "missing Z"),
+          "missing Z field rejected");
+
+    // Off-curve pubkey in a block rejected.
+    secp256k1::Point bad = *secp256k1::pubkey_to_point(utils::compute_pubkey(d));
+    bad.y = (bad.y + 1) % secp256k1::P;
+    auto offc = SignatureParser::parse_block(block("1", "2", "abc",
+                    secp256k1::point_to_pubkey(bad).get_str(16)));
+    check(offc.has_value() && !offc->valid && has(offc->reject_reason, "not a valid secp256k1 point"),
+          "off-curve PubKey in a block rejected");
+
+    // ---- grouping / missing-pubkey policy ----
+    auto mk = [](const mpz& pk) {
+        Signature s; s.r = 1; s.s = 2; s.z = 3; s.pubkey = pk; s.valid = true;
+        return s;
+    };
+    const mpz pkA = utils::compute_pubkey(d);
+    const mpz pkB = utils::compute_pubkey(mpz("0x2222222222222222222222222222222222222222222222222222222222222222"));
+
+    auto g_single = SignatureParser::validate_and_group({mk(pkA), mk(pkA), mk(pkA)}, false);
+    check(g_single.ok && g_single.pubkey == pkA && has(g_single.policy, "strict"),
+          "single-key group accepted under strict policy");
+
+    auto g_mixed = SignatureParser::validate_and_group({mk(pkA), mk(pkB)}, false);
+    check(!g_mixed.ok && has(g_mixed.error, "distinct public keys"),
+          "mixed distinct keys rejected");
+
+    auto g_miss = SignatureParser::validate_and_group({mk(pkA), mk(mpz(0))}, false);
+    check(!g_miss.ok && has(g_miss.error, "missing a PubKey"),
+          "missing PubKey rejected by default");
+
+    auto g_allow = SignatureParser::validate_and_group({mk(pkA), mk(mpz(0))}, true);
+    check(g_allow.ok && has(g_allow.policy, "best-effort"),
+          "missing PubKey accepted best-effort with --allow-no-pubkey");
+}
+
 } // namespace
 
 int main() {
@@ -272,6 +388,10 @@ int main() {
     test_ecdsa_equation_verification();
     std::cout << "\n";
     test_lattice_basis_construction();
+    std::cout << "\n";
+    test_curve_membership();
+    std::cout << "\n";
+    test_input_validation_and_grouping();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;
