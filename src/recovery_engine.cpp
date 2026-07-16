@@ -121,13 +121,15 @@ RecoveryResult RecoveryEngine::run(
     const std::vector<Pair>& pairs,
     RecoveryMethod force_method,
     size_t max_sigs,
-    double max_time_sec
+    double max_time_sec,
+    uint64_t sampling_seed
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
 
     tel_.reset();
     tel_.time_budget_sec = max_time_sec; // 0 = unlimited
+    tel_.sampling_seed = sampling_seed;  // set after reset so it reaches the profiler
     tel_.start_time = start;
     tel_.signatures_loaded = signatures.size();
     tel_.signatures_valid = pairs.size();

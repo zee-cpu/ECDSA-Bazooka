@@ -7,18 +7,24 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find dependencies
 find_package(PkgConfig REQUIRED)
-
 pkg_check_modules(GMP REQUIRED gmp)
 pkg_check_modules(GMPXX REQUIRED gmpxx)
-
-# fplll
 pkg_check_modules(FPLLL REQUIRED fplll)
-
 find_package(Threads REQUIRED)
 
-# Main executable
-add_executable(ecdsa_nonce_recovery
-    src/main.cpp
+# Strict warnings, applied uniformly to every first-party target. Previously
+# only the CLI executable had these; the core library and the tests now get
+# them too, so a warning regression can't hide in code the CLI doesn't compile.
+set(ECDSA_WARNINGS -Wall -Wextra -Wpedantic)
+
+# ---------------------------------------------------------------------------
+# Core library: the single shared implementation of the recovery pipeline.
+# The CLI and the unit tests both link this instead of each re-listing a
+# hand-picked subset of sources (which drifted -- e.g. unit_tests used to omit
+# parser.cpp). PUBLIC usage requirements propagate include dirs + link libs to
+# anything that links the core.
+# ---------------------------------------------------------------------------
+add_library(ecdsa_recovery_core STATIC
     src/parser.cpp
     src/pair_computation.cpp
     src/bias_profiler.cpp
@@ -30,66 +36,55 @@ add_executable(ecdsa_nonce_recovery
     src/secp256k1.cpp
 )
 
-target_include_directories(ecdsa_nonce_recovery PRIVATE
+target_include_directories(ecdsa_recovery_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${GMP_INCLUDE_DIRS}
     ${GMPXX_INCLUDE_DIRS}
     ${FPLLL_INCLUDE_DIRS}
 )
 
-target_link_libraries(ecdsa_nonce_recovery PRIVATE
+target_link_libraries(ecdsa_recovery_core PUBLIC
     ${GMP_LIBRARIES}
     ${GMPXX_LIBRARIES}
     ${FPLLL_LIBRARIES}
     Threads::Threads
 )
 
-target_compile_options(ecdsa_nonce_recovery PRIVATE
-    -Wall -Wextra -Wpedantic
+target_compile_options(ecdsa_recovery_core PRIVATE
+    ${ECDSA_WARNINGS}
     ${GMP_CFLAGS_OTHER}
     ${FPLLL_CFLAGS_OTHER}
 )
 
-# Standalone fplll test binary
-add_executable(fplll_sanity_test
-    tests/fplll_sanity.cpp
-)
+# ---------------------------------------------------------------------------
+# CLI executable
+# ---------------------------------------------------------------------------
+add_executable(ecdsa_nonce_recovery src/main.cpp)
+target_link_libraries(ecdsa_nonce_recovery PRIVATE ecdsa_recovery_core)
+target_compile_options(ecdsa_nonce_recovery PRIVATE ${ECDSA_WARNINGS})
 
+# ---------------------------------------------------------------------------
+# Standalone fplll sanity test (depends only on fplll/gmp, not the core lib)
+# ---------------------------------------------------------------------------
+add_executable(fplll_sanity_test tests/fplll_sanity.cpp)
 target_include_directories(fplll_sanity_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${FPLLL_INCLUDE_DIRS}
     ${GMP_INCLUDE_DIRS}
 )
-
 target_link_libraries(fplll_sanity_test PRIVATE
     ${FPLLL_LIBRARIES}
     ${GMP_LIBRARIES}
     ${GMPXX_LIBRARIES}
 )
 
-# Fast, isolated unit tests (see tests/unit_tests.cpp for what these cover
-# and why they're kept separate from the full e2e pipeline test).
-add_executable(unit_tests
-    tests/unit_tests.cpp
-    src/utils.cpp
-    src/secp256k1.cpp
-    src/verifier.cpp
-    src/lattice_solver.cpp
-    src/parser.cpp
-)
-
-target_include_directories(unit_tests PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${GMP_INCLUDE_DIRS}
-    ${GMPXX_INCLUDE_DIRS}
-    ${FPLLL_INCLUDE_DIRS}
-)
-
-target_link_libraries(unit_tests PRIVATE
-    ${GMP_LIBRARIES}
-    ${GMPXX_LIBRARIES}
-    ${FPLLL_LIBRARIES}
-)
+# ---------------------------------------------------------------------------
+# Fast, isolated unit tests -- link the SAME core library as the CLI, so the
+# tests exercise exactly the code that ships (no separate source list to drift).
+# ---------------------------------------------------------------------------
+add_executable(unit_tests tests/unit_tests.cpp)
+target_link_libraries(unit_tests PRIVATE ecdsa_recovery_core)
+target_compile_options(unit_tests PRIVATE ${ECDSA_WARNINGS})
 
 # Install
 install(TARGETS ecdsa_nonce_recovery DESTINATION bin)

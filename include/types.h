@@ -15,6 +15,10 @@ const mpz SECP256K1_N(
     "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
 );
 
+// Default seed for the profiler's sampling RNG. Fixed (not random_device) so a
+// given input is reproducible run-to-run by default; overridable via --seed.
+constexpr uint64_t DEFAULT_SAMPLING_SEED = 0x5EEDC0DEULL;
+
 // Signature record (parsed)
 struct Signature {
     mpz r;
@@ -112,6 +116,11 @@ struct Telemetry {
     // sweeps instead of being accepted and silently ignored.
     std::atomic<double> time_budget_sec{0.0};
 
+    // Seed for the profiler's sampling RNG (see DEFAULT_SAMPLING_SEED). Set
+    // once per run from --seed; recorded in the run output so a result can be
+    // reproduced exactly.
+    std::atomic<uint64_t> sampling_seed{DEFAULT_SAMPLING_SEED};
+
     bool deadline_exceeded() const {
         double budget = time_budget_sec.load();
         if (budget <= 0.0) return false;
@@ -134,8 +143,10 @@ struct Telemetry {
         return budget - elapsed;
     }
 
-    // Protected strings (guarded)
-    std::mutex str_mutex;
+    // Protected strings (guarded). mutable so const getters can lock it
+    // without const_cast -- locking a mutex is not a logical mutation of the
+    // object's observable state, which is exactly what mutable is for.
+    mutable std::mutex str_mutex;
     std::string current_phase;
     std::string status_message;
     std::string recovered_key_hex;
@@ -178,7 +189,7 @@ struct Telemetry {
     }
 
     std::string get_phase() const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(str_mutex));
+        std::lock_guard<std::mutex> lock(str_mutex);
         return current_phase;
     }
 
@@ -188,7 +199,7 @@ struct Telemetry {
     }
 
     std::string get_status() const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(str_mutex));
+        std::lock_guard<std::mutex> lock(str_mutex);
         return status_message;
     }
 
@@ -198,7 +209,7 @@ struct Telemetry {
     }
 
     std::string get_recovered_key() const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(str_mutex));
+        std::lock_guard<std::mutex> lock(str_mutex);
         return recovered_key_hex;
     }
 
@@ -208,7 +219,7 @@ struct Telemetry {
     }
 
     std::string get_error() const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(str_mutex));
+        std::lock_guard<std::mutex> lock(str_mutex);
         return error_message;
     }
 };

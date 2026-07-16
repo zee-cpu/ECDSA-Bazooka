@@ -7,13 +7,17 @@ This document gives the exact command set to build, test, and run the project.
 ```
 ecdsa_nonce_recovery/
 ├── CMakeLists.txt
+├── CMakePresets.json         ← release / debug / asan presets
 ├── COMMANDS.md               ← this file
+├── README.md
 ├── include/                  ← all .h headers
-├── src/                      ← all .cpp sources
+├── src/                      ← all .cpp sources (compiled into ecdsa_recovery_core)
 ├── scripts/
 │   └── generate_mock_signatures.py
 ├── tests/
-│   └── fplll_sanity.cpp
+│   ├── unit_tests.cpp        ← fast isolated unit tests
+│   ├── fplll_sanity.cpp
+│   └── e2e_recovery_test.sh
 ├── build/                    ← created by cmake
 └── data/                     ← generated signature files
 ```
@@ -34,31 +38,53 @@ sudo apt-get install -y \
 pip3 install ecdsa
 ```
 
+### Dependency / version matrix
+
+Tested against the versions below (Ubuntu 24.04). Others likely work; these are
+what the build and validation runs used.
+
+| Component     | Package (apt)              | Version tested | Required            |
+|---------------|----------------------------|----------------|---------------------|
+| CMake         | `cmake`                    | 3.28 (≥ 3.16; presets need ≥ 3.21) | yes |
+| C++ compiler  | `g++`                      | C++20 (GCC 13) | yes                 |
+| GMP           | `libgmp-dev`               | 6.x            | yes                 |
+| GMP C++       | `libgmpxx4ldbl`            | 6.x            | yes                 |
+| fplll         | `libfplll-dev` / `libfplll9` | 5.4.x        | yes                 |
+| MPFR          | `libmpfr-dev`              | 4.x            | yes (via fplll)     |
+| Python + ecdsa| `python3`, `pip install ecdsa` | 3.10+     | test data only      |
+
+FFTW is **not** a dependency (the former FFT path was removed). fplll's bundled
+BKZ pruning strategy file (`default.json`) is used if found on a standard prefix;
+override its location with `ECDSA_FPLLL_STRATEGY=/path/to/default.json`.
+
 ## 3. Full Build (CMake + Make)
 
+The recommended path is CMake presets (needs CMake ≥ 3.21):
+
 ```bash
-# Go to project root
 cd /home/user/ecdsa_nonce_recovery
-
-# Clean previous build (recommended)
-rm -rf build
-mkdir -p build data
-
-# Configure
-cd build
-cmake ..
-
-# Build (all targets)
-make -j$(nproc)
-
-# (Optional) build just the main binary or test
-make -j$(nproc) ecdsa_nonce_recovery
-make fplll_sanity_test
+cmake --preset release          # configures into build/
+cmake --build --preset release -j$(nproc)
+ctest --preset release          # runs unit_tests + fplll_sanity + e2e
 ```
+
+Available presets: `release` (build/), `debug` (build-debug/), `asan`
+(build-asan/, AddressSanitizer + UBSan). The plain flow still works:
+
+```bash
+rm -rf build && mkdir -p build data
+cd build && cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)                 # all targets
+make -j$(nproc) ecdsa_nonce_recovery   # or just the CLI
+```
+
+All first-party code compiles into one library (`ecdsa_recovery_core`); the CLI
+and the unit tests both link it, so they exercise the same implementation.
 
 **Resulting binaries:**
 - `build/ecdsa_nonce_recovery` — main recovery tool
-- `build/fplll_sanity_test`   — standalone fplll integration test
+- `build/unit_tests`           — fast isolated unit tests
+- `build/fplll_sanity_test`    — standalone fplll integration test
 
 ## 4. Quick Sanity Check (fplll)
 
@@ -248,6 +274,8 @@ cd build && make -j$(nproc)
 | `-t SEC`              | Max time budget                      | unlimited |
 | `-v`                  | Live telemetry dashboard             | on        |
 | `-q`                  | Quiet (no live updates)              | off       |
+| `--allow-no-pubkey`   | Best-effort recovery w/o PubKey (unverifiable) | off |
+| `--seed N`            | Sampling RNG seed (hex or decimal), for reproducibility | fixed |
 | `-h`                  | Help                                 | —         |
 
 ## 11. Expected Behavior per Bias Level

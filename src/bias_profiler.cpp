@@ -186,7 +186,12 @@ BiasProfile BiasProfiler::profile(const std::vector<Pair>& pairs, Telemetry* tel
         return prof;
     }
 
-    std::mt19937_64 rng(std::random_device{}());
+    // Deterministic by default: seed from the run's configured sampling_seed
+    // (fixed unless overridden via --seed) rather than std::random_device, so
+    // the same input reproduces the same sampling -- and therefore the same
+    // result -- on every run.
+    uint64_t seed = telemetry ? telemetry->sampling_seed.load() : DEFAULT_SAMPLING_SEED;
+    std::mt19937_64 rng(seed);
     size_t sample_size = std::min<size_t>(pairs.size(), 4500);
     auto sampled = sample_pairs(pairs, sample_size, rng);
 
@@ -285,7 +290,11 @@ std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>&
 
 
 
-std::tuple<double, mpz, mpz, double> BiasProfiler::detect_modulo_bias(const std::vector<Pair>& pairs) {
+std::tuple<double, mpz, mpz, double> BiasProfiler::detect_modulo_bias(
+        [[maybe_unused]] const std::vector<Pair>& pairs) {
+    // Stub: modulo / Extended-HNP bias is not implemented (see README). The
+    // `pairs` parameter is intentionally kept for the eventual real signature
+    // and marked maybe_unused so the project-wide strict warnings stay clean.
     return {0.0, mpz(0), mpz(0), 0.0};
 }
 

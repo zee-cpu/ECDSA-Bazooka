@@ -13,7 +13,8 @@ public:
         const std::vector<Pair>& pairs,
         RecoveryMethod force_method = RecoveryMethod::AUTO,
         size_t max_sigs = 0,
-        double max_time_sec = 0.0
+        double max_time_sec = 0.0,
+        uint64_t sampling_seed = DEFAULT_SAMPLING_SEED
     );
 
 private:

@@ -22,6 +22,7 @@ static void print_usage(const char* prog) {
     std::cout << "  -q, --quiet            Disable live updates (for logs)\n";
     std::cout << "      --allow-no-pubkey  Permit best-effort recovery when signatures\n";
     std::cout << "                         lack a PubKey (result cannot be verified)\n";
+    std::cout << "      --seed N           Sampling RNG seed (default fixed; for reproducibility)\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -42,8 +43,9 @@ int main(int argc, char** argv) {
     bool verbose = true;
     bool quiet = false;
     bool allow_no_pubkey = false;
+    uint64_t sampling_seed = DEFAULT_SAMPLING_SEED;
 
-    enum { OPT_ALLOW_NO_PUBKEY = 1000 };
+    enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -52,6 +54,7 @@ int main(int argc, char** argv) {
         {"verbose", no_argument, 0, 'v'},
         {"quiet", no_argument, 0, 'q'},
         {"allow-no-pubkey", no_argument, 0, OPT_ALLOW_NO_PUBKEY},
+        {"seed", required_argument, 0, OPT_SEED},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -82,6 +85,9 @@ int main(int argc, char** argv) {
                 break;
             case OPT_ALLOW_NO_PUBKEY:
                 allow_no_pubkey = true;
+                break;
+            case OPT_SEED:
+                sampling_seed = std::stoull(optarg, nullptr, 0);  // accepts 0x.. or decimal
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -153,7 +159,8 @@ int main(int argc, char** argv) {
         pairs,
         force_method,
         max_sigs,
-        max_time
+        max_time,
+        sampling_seed
     );
 
     // Stop renderer
@@ -165,6 +172,9 @@ int main(int argc, char** argv) {
     // Final report
     std::cout << "\n\n=== RECOVERY RESULT ===\n";
     std::cout << "Input: " << input_file << "\n";
+    std::cout << "Input policy: " << group.policy << "\n";
+    std::cout << "Sampling seed: 0x" << std::hex << sampling_seed << std::dec
+              << " (reproduce with --seed 0x" << std::hex << sampling_seed << std::dec << ")\n";
     std::cout << "Signatures processed: " << res.signatures_used << "\n";
     std::cout << "Bias profile: " << (res.bias_profile.bias_detected ? "DETECTED" : "NONE/UNKNOWN") << "\n";
     auto bias_type_name = [](BiasType t) {
