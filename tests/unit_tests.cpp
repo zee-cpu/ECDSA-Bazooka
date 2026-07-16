@@ -292,6 +292,79 @@ void test_curve_membership() {
 }
 
 // ---------------------------------------------------------------------
+// Compressed SEC1 pubkey support. pubkey_to_point used to accept only the
+// uncompressed (0x04) form; a 33-byte compressed key (0x02/0x03 || x, y
+// recovered from the curve) was padded to 130 chars and rejected. Pin the
+// decompression math and parity selection so a refactor can't regress it.
+// ---------------------------------------------------------------------
+namespace {
+    // Canonical compressed SEC1 encoding of a point: marker byte (0x02 if y is
+    // even, 0x03 if odd) followed by the 32-byte X coordinate, as an mpz.
+    mpz compress(const secp256k1::Point& p) {
+        std::string xstr = p.x.get_str(16);
+        xstr = std::string(64 - xstr.size(), '0') + xstr;
+        const char* marker = (mpz_odd_p(p.y.get_mpz_t()) != 0) ? "03" : "02";
+        return mpz(std::string("0x") + marker + xstr);
+    }
+}
+
+void test_compressed_pubkey() {
+    std::cout << "-- compressed SEC1 pubkey support --\n";
+    using namespace secp256k1;
+
+    // G in compressed form must decompress back to exactly G.
+    check(pubkey_to_point(compress(G)).has_value() &&
+          points_equal(*pubkey_to_point(compress(G)), G),
+          "compressed G decompresses to G");
+
+    // A real key d*G survives a compress -> decompress round-trip.
+    mpz d("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    Point dG = scalar_mult(d, G);
+    auto pt = pubkey_to_point(compress(dG));
+    check(pt.has_value(), "compressed d*G parses to a point");
+    if (pt.has_value())
+        check(points_equal(*pt, dG), "compressed d*G decompresses to d*G");
+
+    // Flipping only the marker byte must yield the *other* root, P - y, which
+    // is the negation of the point -- still on-curve, but not the same point.
+    // get_str drops the marker byte's leading zero nibble, so the marker's low
+    // nibble is chex[0] ('2' or '3') -- flip that, not the following X digit.
+    std::string chex = compress(dG).get_str(16);
+    chex[0] = (chex[0] == '2') ? '3' : '2';   // 0x02 <-> 0x03
+    auto flipped = pubkey_to_point(mpz(std::string("0x") + chex));
+    check(flipped.has_value() && is_on_curve(*flipped) && !points_equal(*flipped, dG),
+          "flipping the marker selects the opposite-parity root");
+    if (flipped.has_value())
+        check((*flipped).y == (P - dG.y), "opposite root is P - y (the negation)");
+
+    // An X that is not a valid compressed key (no y solves the curve) is
+    // rejected rather than silently accepted. x=5: y^2 = 132 is a non-residue
+    // mod P, so no point has this X.
+    mpz bad_x("0x02" "0000000000000000000000000000000000000000000000000000000000000005");
+    check(!pubkey_to_point(bad_x).has_value(),
+          "compressed key with non-residue X is rejected");
+
+    // End to end: an all-compressed dataset parses through the parser and the
+    // shared key groups as a single strict-policy key.
+    const mpz key("0x1111111111111111111111111111111111111111111111111111111111111111");
+    const std::string ck = compress(scalar_mult(key, G)).get_str(16);
+    std::string doc;
+    for (int i = 1; i <= 2; ++i) {
+        doc += "Signature #" + std::to_string(i) + "\n";
+        doc += "R = 0x1\nS = 0x2\nZ = 0x3\n";
+        doc += "PubKey: " + ck + "\n\n";
+    }
+    std::string path = "/tmp/test_compressed_ds.txt";
+    { std::ofstream f(path); f << doc; }
+    Telemetry tel;
+    auto sigs = SignatureParser::parse_file(path, &tel);
+    check(sigs.size() == 2, "both compressed-key records parse as valid");
+    auto grp = SignatureParser::validate_and_group(sigs, /*allow_no_pubkey=*/false);
+    check(grp.ok && grp.policy.rfind("strict", 0) == 0,
+          "all-compressed dataset groups as one strict-policy key");
+}
+
+// ---------------------------------------------------------------------
 // Parser input-integrity boundary (Phase 2): scalar-range and malformed-field
 // rejection with actionable reasons, and the single-key grouping / missing-
 // pubkey policy. Replaces the old "r,s != 0" rubber stamp.
@@ -425,6 +498,8 @@ int main() {
     test_lattice_basis_construction();
     std::cout << "\n";
     test_curve_membership();
+    std::cout << "\n";
+    test_compressed_pubkey();
     std::cout << "\n";
     test_input_validation_and_grouping();
     std::cout << "\n";

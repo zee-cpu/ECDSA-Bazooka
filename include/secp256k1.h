@@ -36,9 +36,11 @@ namespace secp256k1 {
     // must be a real affine point.
     bool is_on_curve(const Point& pt);
 
-    // Convert uncompressed pubkey (04 || x || y) mpz to Point. Returns
-    // nullopt unless it is canonically encoded (65 bytes, 0x04 marker), has
-    // both coordinates within the field, and lies on the curve.
+    // Convert a SEC1 pubkey mpz to a Point. Accepts both the uncompressed
+    // form (65 bytes, 0x04 || x || y) and the compressed form (33 bytes,
+    // 0x02/0x03 || x, with y recovered from the curve). Returns nullopt
+    // unless the encoding is canonical, coordinates are within the field,
+    // and the point lies on the curve.
     std::optional<Point> pubkey_to_point(const mpz& pubkey_mpz);
 
     // Convert point back to uncompressed pubkey mpz (04 || x(32B) || y(32B))

@@ -93,31 +93,68 @@ std::optional<Point> pubkey_to_point(const mpz& pubkey_mpz) {
     if (pubkey_mpz <= 0) return std::nullopt;
     std::string hex = pubkey_mpz.get_str(16);
 
-    // GMP's get_str never prints insignificant leading zero hex digits.
-    // The uncompressed SEC1 marker byte is 0x04 -- its high nibble is
-    // always zero -- so this string is *always* short by at least that
-    // one digit (129 chars, not 130), and can be shorter still if the X
-    // coordinate itself happens to start with zero byte(s). Left-padding
-    // to the canonical 65-byte (130 hex char) length reconstructs any of
-    // those dropped leading zeros correctly, rather than special-casing
-    // only the "whole marker byte missing" scenario.
+    // GMP's get_str never prints insignificant leading zero hex digits, so the
+    // stored value is always short by at least the marker byte's high nibble
+    // (which is 0 for every SEC1 form). We reconstruct the dropped leading
+    // zeros by left-padding to the canonical width for whichever encoding this
+    // is -- uncompressed (65 bytes / 130 hex) or compressed (33 bytes / 66 hex).
+    //
+    // The two widths never collide: an uncompressed key (marker 0x04) always
+    // yields exactly 129 significant hex digits, and a compressed key
+    // (marker 0x02/0x03) always yields exactly 65, because the marker's low
+    // nibble is nonzero and sits at a fixed high position. So length alone
+    // tells the forms apart; the 66-char threshold cleanly separates them.
     if (hex.size() > 130) return std::nullopt; // too large to be a valid point
-    if (hex.size() < 130) {
-        hex = std::string(130 - hex.size(), '0') + hex;
+
+    const bool compressed = hex.size() <= 66;
+    const size_t width = compressed ? 66 : 130;
+    if (hex.size() < width) {
+        hex = std::string(width - hex.size(), '0') + hex;
     }
 
-    if (hex.substr(0, 2) != "04") return std::nullopt;
+    std::string prefix = hex.substr(0, 2);
+    mpz x;
 
-    std::string xhex = hex.substr(2, 64);
-    std::string yhex = hex.substr(66, 64);
+    if (!compressed) {
+        if (prefix != "04") return std::nullopt;
+        std::string xhex = hex.substr(2, 64);
+        std::string yhex = hex.substr(66, 64);
+        mpz y;
+        x.set_str(xhex, 16);
+        y.set_str(yhex, 16);
+        // Reject off-curve / out-of-field points instead of trusting the
+        // encoding. A malformed or attacker-supplied pubkey that parses
+        // structurally but is not a real curve point must never be accepted
+        // as a recovery target.
+        Point pt{x, y, false};
+        if (!is_on_curve(pt)) return std::nullopt;
+        return pt;
+    }
 
-    mpz x, y;
-    x.set_str(xhex, 16);
-    y.set_str(yhex, 16);
+    // Compressed SEC1: marker (0x02 => even y, 0x03 => odd y) followed by the
+    // 32-byte X coordinate. We recover Y by solving the curve equation for it.
+    if (prefix != "02" && prefix != "03") return std::nullopt;
+    x.set_str(hex.substr(2, 64), 16);
+    if (x < 0 || x >= P) return std::nullopt;  // X must be a field element
 
-    // Reject off-curve / out-of-field points instead of trusting the encoding.
-    // A malformed or attacker-supplied pubkey that parses structurally but is
-    // not a real curve point must never be accepted as a recovery target.
+    // Modular square root of y^2 = x^3 + 7 (mod P). secp256k1's P is prime and
+    // P % 4 == 3, so a square root (when one exists) is a^((P+1)/4) mod P.
+    mpz alpha = (((x * x) % P) * x + 7) % P;  // y^2
+    mpz y;
+    mpz exp = (P + 1) / 4;
+    mpz_powm(y.get_mpz_t(), alpha.get_mpz_t(), exp.get_mpz_t(), P.get_mpz_t());
+
+    // The candidate is only a real root if squaring it returns alpha; when x is
+    // not a valid compressed X (no y satisfies the curve), it won't -- reject.
+    if ((y * y) % P != alpha) return std::nullopt;
+
+    // Two roots exist: y and P-y, with opposite parities. Pick the one whose
+    // low bit matches the marker (0x02 => even, 0x03 => odd).
+    bool want_odd = (prefix == "03");
+    if ((mpz_odd_p(y.get_mpz_t()) != 0) != want_odd) {
+        y = P - y;
+    }
+
     Point pt{x, y, false};
     if (!is_on_curve(pt)) return std::nullopt;
     return pt;
