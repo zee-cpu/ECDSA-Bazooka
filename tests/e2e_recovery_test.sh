@@ -59,7 +59,13 @@ echo
 echo "=== E2E: unbiased data must NOT produce a false recovery ==="
 f="$WORKDIR/none.txt"
 python3 "$GEN" --count 800 --bias none --bias-bits 0 --output "$f" --seed 21 > /dev/null 2>&1
-run_out=$(timeout 120 "$BINARY" -i "$f" -q 2>&1)
+# Must pass an explicit -t: without a time budget the budget-fit guards are
+# inert (remaining_budget_seconds() returns the unlimited sentinel), so the
+# sweep runs unbounded looking for a key that isn't there and gets killed by
+# the outer timeout before it can print [FAILURE]. With -t the binary enforces
+# its own budget and reports FAILURE cleanly. Outer timeout is kept larger than
+# -t as a safety net (a single fplll call can't be interrupted mid-reduction).
+run_out=$(timeout 130 "$BINARY" -i "$f" -q -t 90 2>&1)
 echo "$run_out" | grep -q '\[FAILURE\]'
 check "unbiased data: reports FAILURE (no false positive)" "$?"
 

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Deps are identical across jobs; kept inline per job for readability. All
+# jobs run on ubuntu-latest (24.04: cmake 3.28, gcc 13, fplll 5.4).
+jobs:
+  build-test:
+    name: Build + fast tests (warning-gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl \
+            libfplll-dev libmpfr-dev python3 python3-pip
+          pip3 install --break-system-packages ecdsa || pip3 install ecdsa
+      - name: Configure (Release)
+        run: cmake --preset release
+      - name: Build and fail on any compiler warning
+        run: |
+          set -o pipefail
+          cmake --build --preset release -j"$(nproc)" 2>&1 | tee build.log
+          if grep -q "warning:" build.log; then
+            echo "::error::compiler warnings present -- strict-warning build must stay clean"
+            exit 1
+          fi
+      - name: Unit tests
+        run: ./build/unit_tests
+      - name: Differential ECC test (vs `ecdsa`)
+        run: python3 tests/ecc_differential_test.py ./build/ecc_diff_tool
+      - name: fplll sanity
+        run: ./build/fplll_sanity_test
+
+  asan:
+    name: ASan + UBSan (unit + differential)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl \
+            libfplll-dev libmpfr-dev python3 python3-pip
+          pip3 install --break-system-packages ecdsa || pip3 install ecdsa
+      - name: Configure (ASan/UBSan)
+        run: cmake --preset asan
+      - name: Build
+        run: cmake --build --preset asan -j"$(nproc)"
+      - name: Unit tests under sanitizers
+        run: ./build-asan/unit_tests
+      - name: Differential ECC test under sanitizers
+        run: python3 tests/ecc_differential_test.py ./build-asan/ecc_diff_tool
+
+  e2e-smoke:
+    name: E2E smoke (real recovery)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl \
+            libfplll-dev libmpfr-dev python3 python3-pip
+          pip3 install --break-system-packages ecdsa || pip3 install ecdsa
+      - name: Build CLI
+        run: |
+          cmake --preset release
+          cmake --build --preset release -j"$(nproc)" --target ecdsa_nonce_recovery
+      - name: Recover a real MSB-12 key end-to-end
+        run: |
+          # Strong bias => resolves under plain LLL (no BKZ strategy file
+          # needed), so this stays fast and deterministic on CI runners.
+          gt=$(python3 scripts/generate_mock_signatures.py --count 500 --bias msb \
+                 --bias-bits 12 --output /tmp/ci_msb12.txt --seed 11 \
+               | grep -i "exact for verification" | grep -oE '0x[0-9a-fA-F]+')
+          out=$(timeout 180 ./build/ecdsa_nonce_recovery -i /tmp/ci_msb12.txt -q -t 150)
+          echo "$out" | grep -q '\[SUCCESS\]' || { echo "no SUCCESS"; echo "$out"; exit 1; }
+          rec=$(echo "$out" | grep -oE 'd = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
+          if [ "$rec" != "$gt" ]; then
+            echo "key mismatch: ground-truth=$gt recovered=$rec"; exit 1
+          fi
+          echo "e2e OK: recovered $rec"

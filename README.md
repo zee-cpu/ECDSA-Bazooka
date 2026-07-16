@@ -65,9 +65,15 @@ an optimization, not a hard dependency.
 ## Testing
 
 ```bash
-./build/unit_tests                  # fast (<1s): math, transforms, verification logic
+./build/unit_tests                  # fast (<1s): math, transforms, validation, ECC edge cases
+ctest -R ecc_differential            # local ECC vs the trusted `ecdsa` library (edge + random)
 ctest -R e2e_recovery                # slow (~5min): real recovery against real ground truth
 ```
+
+CI (`.github/workflows/ci.yml`) runs, on every push/PR: a warning-gated Release
+build, the unit + differential tests, an ASan/UBSan pass, and a bounded
+end-to-end recovery smoke test. Sanitizer builds are available locally via
+`cmake --preset asan`.
 
 ## Where things live
 
