@@ -76,7 +76,12 @@ struct BiasProfile {
 enum class RecoveryMethod {
     AUTO,
     LATTICE,
-    FALLBACK
+    FALLBACK,
+    // Closed-form recovery from a reused nonce (two signatures share r because
+    // they share k). Not a statistical bias -- a nonce *collision* -- so it
+    // bypasses the lattice entirely. New values go at the end: Telemetry casts
+    // this enum to int, so appending keeps existing on-the-wire values stable.
+    REPEATED_NONCE
 };
 
 // Telemetry state for live dashboard (thread-safe)

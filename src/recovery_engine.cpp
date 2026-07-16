@@ -5,6 +5,7 @@
 #include "utils.h"
 #include <chrono>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -59,6 +60,61 @@ std::optional<mpz> RecoveryEngine::try_fallback_ladder(const std::vector<Pair>& 
     // verified: fall back to whatever was found so the caller's own
     // verification step still runs and reports honestly.
     return best_unverified;
+}
+
+std::optional<mpz> RecoveryEngine::try_repeated_nonce(
+    const std::vector<Signature>& signatures, const mpz& pubkey_hint) {
+    tel_.set_phase("Scanning for repeated nonces");
+
+    const mpz& n = SECP256K1_N;
+    // First r we've seen -> its signature index. A later signature with the
+    // same r reused the same nonce: r = (k*G).x mod n depends only on k, so a
+    // repeated r means a repeated k. (Two *different* nonces k and n-k also
+    // share an r, since they have the same x-coordinate -- the pubkey check
+    // below is what rejects that antipodal case, so a same-r hit is a
+    // candidate, not a proof.)
+    std::map<mpz, size_t> first_seen;
+
+    for (size_t i = 0; i < signatures.size(); ++i) {
+        const Signature& a = signatures[i];
+        if (!a.valid) continue;
+
+        auto [it, inserted] = first_seen.try_emplace(a.r, i);
+        if (inserted) continue;  // first time we've seen this r
+        const Signature& b = signatures[it->second];
+
+        // Same r on a and b. From s = k^-1 (z + r d):
+        //   s_a - s_b = k^-1 (z_a - z_b)  =>  k = (z_a - z_b)(s_a - s_b)^-1
+        //   d = (s_a k - z_a) r^-1  (mod n)
+        // If s_a == s_b the difference is non-invertible: either a literal
+        // duplicate record (z_a == z_b) or a degenerate case. Skip it and keep
+        // scanning -- other collisions may still be genuine.
+        mpz s_diff = (a.s - b.s) % n; if (s_diff < 0) s_diff += n;
+        if (s_diff == 0) continue;
+        mpz z_diff = (a.z - b.z) % n; if (z_diff < 0) z_diff += n;
+
+        mpz k = utils::mod_mul(z_diff, utils::mod_inverse(s_diff, n), n);
+
+        mpz num = ((a.s * k) % n - a.z) % n; if (num < 0) num += n;
+        mpz d = utils::mod_mul(num, utils::mod_inverse(a.r, n), n);
+        if (d <= 0 || d >= n) continue;
+
+        // Exact gate. With a pubkey we can prove correctness outright, which
+        // also rejects the antipodal (k_b = n - k_a) false collision -- on a
+        // mismatch we keep scanning rather than returning a wrong key. Without
+        // a pubkey (opt-in best-effort mode) there is nothing here to prove it
+        // against, so we return the algebraic candidate and let run()'s own
+        // Verifier::verify_candidate be the honest gate; it checks d against
+        // signatures *other* than a and b, which a wrong antipodal d fails.
+        if (pubkey_hint != 0 && !utils::verify_pubkey(d, pubkey_hint)) continue;
+
+        tel_.active_method = static_cast<int>(RecoveryMethod::REPEATED_NONCE);
+        tel_.method_chosen = true;
+        tel_.set_status("Reused nonce: signatures #" + std::to_string(b.index) +
+                        " and #" + std::to_string(a.index));
+        return d;
+    }
+    return std::nullopt;
 }
 
 bool RecoveryEngine::dispatch_and_recover(
@@ -140,18 +196,34 @@ RecoveryResult RecoveryEngine::run(
         return result;
     }
 
-    // Profile
-    tel_.set_phase("Profiling bias");
-    BiasProfile profile = BiasProfiler::profile(pairs, &tel_);
-
     mpz pubkey_hint = signatures.empty() ? mpz(0) : signatures[0].pubkey;
 
-    bool dispatch_ok = dispatch_and_recover(profile, pairs, force_method, max_sigs, pubkey_hint, result);
+    // Phase 6a pre-scan: a reused nonce is the most common catastrophic ECDSA
+    // RNG failure in the wild (Sony PS3, the 2013 Android SecureRandom Bitcoin
+    // thefts). It is not a *bias* the lattice can exploit -- it is a nonce
+    // *collision* that hands over the key by closed-form algebra, from as few
+    // as two signatures, in O(n log n). So check it first and short-circuit
+    // the entire profile/lattice pipeline on a verified hit. When there's no
+    // collision this is a cheap no-op and recovery proceeds normally.
+    if (auto rn = try_repeated_nonce(signatures, pubkey_hint)) {
+        result.private_key = *rn;
+        result.private_key_hex = utils::mpz_to_hex(*rn);
+        result.method_used = RecoveryMethod::REPEATED_NONCE;
+        result.signatures_used = signatures.size();
+        result.bias_profile.description =
+            "Reused nonce (r-collision) -- recovered by closed-form algebra, no lattice";
+    } else {
+        // Profile
+        tel_.set_phase("Profiling bias");
+        BiasProfile profile = BiasProfiler::profile(pairs, &tel_);
 
-    if (!dispatch_ok || !result.private_key) {
-        result.success = false;
-        tel_.recovery_complete = true;
-        return result;
+        bool dispatch_ok = dispatch_and_recover(profile, pairs, force_method, max_sigs, pubkey_hint, result);
+
+        if (!dispatch_ok || !result.private_key) {
+            result.success = false;
+            tel_.recovery_complete = true;
+            return result;
+        }
     }
 
     // Strict verification

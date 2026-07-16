@@ -23,6 +23,14 @@ private:
     std::optional<mpz> try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
     std::optional<mpz> try_fallback_ladder(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
 
+    // Phase 6a: cheap O(n log n) pre-scan for reused nonces. Two signatures
+    // that share r were made with the same nonce k, which yields the private
+    // key by closed-form algebra alone. Returns the key only if it checks out
+    // against pubkey_hint (or, in best-effort no-pubkey mode, the algebraic
+    // result for the caller's own verification to gate). std::nullopt if no
+    // usable collision exists.
+    std::optional<mpz> try_repeated_nonce(const std::vector<Signature>& signatures, const mpz& pubkey_hint);
+
     bool dispatch_and_recover(
         const BiasProfile& profile,
         const std::vector<Pair>& pairs,

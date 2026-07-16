@@ -11,6 +11,8 @@
 #include "verifier.h"
 #include "lattice_solver.h"
 #include "parser.h"
+#include "pair_computation.h"
+#include "recovery_engine.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -292,6 +294,67 @@ void test_curve_membership() {
 }
 
 // ---------------------------------------------------------------------
+// Repeated-nonce (r-collision) recovery (Phase 6a). Two signatures that reuse
+// the same nonce k share the same r, and that alone yields the private key by
+// closed-form algebra -- no lattice, no bias. The pre-scan must find such a
+// collision buried in a larger set and short-circuit to the exact key.
+// ---------------------------------------------------------------------
+namespace {
+    // Minimal ECDSA sign for tests: r = (k*G).x mod n; s = k^-1 (z + r*d) mod n.
+    Signature make_sig(const mpz& d, const mpz& z, const mpz& k,
+                       const mpz& pubkey, size_t idx) {
+        const mpz& n = SECP256K1_N;
+        secp256k1::Point R = secp256k1::scalar_mult(k, secp256k1::G);
+        mpz r = R.x % n;
+        mpz s = utils::mod_mul(utils::mod_inverse(k, n), (z + r * d) % n, n);
+        Signature sig;
+        sig.r = r; sig.s = s; sig.z = z; sig.pubkey = pubkey;
+        sig.valid = true; sig.index = idx;
+        return sig;
+    }
+}
+
+void test_repeated_nonce() {
+    std::cout << "-- repeated-nonce (r-collision) recovery (Phase 6a) --\n";
+    const mpz d("0x0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    // A realistic set with three tricky cases mixed together:
+    //   idx 1-3: distinct nonces (populate the r-map, no collision)
+    //   idx 4-5: a literal DUPLICATE record (identical r,s,z) -- shares r but
+    //            s_diff == 0 is non-invertible, so it must be SKIPPED, not
+    //            crash or yield a bogus key
+    //   idx 6-7: a genuine reused nonce (same k, different messages) -- the
+    //            one exploitable collision, which must recover the exact key
+    // The pre-scan has to skip the duplicate and still find the real reuse.
+    const mpz base_k("0x7fabc0ffee1234567890fedcba09876543210abcdef1234567890abcdef01234");
+    const mpz dup_k ("0x1122334455667788990011223344556677889900112233445566778899001122");
+    const mpz k_reused("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+    std::vector<Signature> sigs;
+    for (int i = 1; i <= 3; ++i)
+        sigs.push_back(make_sig(d, mpz(1000 + i), base_k + i, pubkey, i));
+    sigs.push_back(make_sig(d, mpz(42), dup_k, pubkey, 4));   // duplicate pair...
+    sigs.push_back(make_sig(d, mpz(42), dup_k, pubkey, 5));   // ...identical r,s,z
+    sigs.push_back(make_sig(d, mpz("0xdeadbeef01"), k_reused, pubkey, 6));
+    sigs.push_back(make_sig(d, mpz("0xdeadbeef02"), k_reused, pubkey, 7));
+
+    check(sigs[3].r == sigs[4].r && sigs[3].s == sigs[4].s, "duplicate record shares r and s");
+    check(sigs[5].r == sigs[6].r && sigs[5].s != sigs[6].s, "reused-nonce pair shares r but not s");
+    check(sigs[0].r != sigs[1].r, "distinct-nonce signatures have distinct r");
+
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(sigs, &tel);
+    RecoveryEngine engine(tel);
+    RecoveryResult res = engine.run(sigs, pairs);
+
+    check(res.success, "repeated-nonce set recovers a verified key");
+    check(res.method_used == RecoveryMethod::REPEATED_NONCE,
+          "recovery method is reported as REPEATED_NONCE");
+    check(res.private_key == d,
+          "recovered key equals the true private key (duplicate record skipped, real reuse found)");
+}
+
+// ---------------------------------------------------------------------
 // Compressed SEC1 pubkey support. pubkey_to_point used to accept only the
 // uncompressed (0x04) form; a 33-byte compressed key (0x02/0x03 || x, y
 // recovered from the curve) was padded to 130 chars and rejected. Pin the
@@ -498,6 +561,8 @@ int main() {
     test_lattice_basis_construction();
     std::cout << "\n";
     test_curve_membership();
+    std::cout << "\n";
+    test_repeated_nonce();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

@@ -198,6 +198,7 @@ int main(int argc, char** argv) {
             switch (m) {
                 case RecoveryMethod::LATTICE: return "LATTICE";
                 case RecoveryMethod::FALLBACK: return "FALLBACK";
+                case RecoveryMethod::REPEATED_NONCE: return "REPEATED_NONCE";
                 default: return "UNKNOWN";
             }
         };
