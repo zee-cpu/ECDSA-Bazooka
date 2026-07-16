@@ -27,7 +27,6 @@ sudo apt-get install -y \
     cmake g++ \
     libgmp-dev libgmpxx4ldbl \
     libfplll-dev libfplll9 \
-    libfftw3-dev \
     libmpfr-dev \
     python3-pip
 
@@ -109,7 +108,9 @@ python3 scripts/generate_mock_signatures.py \
     --count 3000 --bias lsb --bias-bits 8 \
     --output data/lsb_8b_3k.txt --seed 777
 
-# MODULO bias (the regression benchmark)
+# MODULO bias -- generator only; recovery is NOT implemented
+# (detect_modulo_bias is a stub). The tool will report failure on this
+# input. Kept as a negative fixture, not a supported recovery benchmark.
 python3 scripts/generate_mock_signatures.py \
     --count 50000 --bias modulo --bias-bits 8 \
     --output data/modulo_8b_50k.txt --seed 2026
@@ -149,7 +150,7 @@ The dashboard updates every ~120ms and shows:
 - Signatures loaded / valid
 - Detected bias type + leaked bits + confidence (σ)
 - Active recovery method
-- Lattice/FFT progress
+- Lattice progress (leak level L, LLL/BKZ, dimension)
 - Final result + verification status
 
 ### Force a specific method (debugging)
@@ -158,10 +159,7 @@ The dashboard updates every ~120ms and shows:
 # Force lattice only
 ./ecdsa_nonce_recovery -i ../data/msb_12b_800.txt -m lattice -v
 
-# Force FFT (only useful for very low bias + huge files)
-./ecdsa_nonce_recovery -i ../data/modulo_8b_50k.txt -m fft -v
-
-# Force fallback ladder
+# Force fallback ladder (wider lattice sweep for weak/undetected bias)
 ./ecdsa_nonce_recovery -i ../data/nobias_1k.txt -m fallback -v
 ```
 
@@ -245,7 +243,7 @@ cd build && make -j$(nproc)
 | Flag                  | Meaning                              | Default   |
 |-----------------------|--------------------------------------|-----------|
 | `-i FILE` / `--input` | Signature file (required)            | —         |
-| `-m METHOD`           | `auto \| lattice \| fft \| fallback` | `auto`    |
+| `-m METHOD`           | `auto \| lattice \| fallback`        | `auto`    |
 | `-s N`                | Max signatures to use                | all       |
 | `-t SEC`              | Max time budget                      | unlimited |
 | `-v`                  | Live telemetry dashboard             | on        |
@@ -256,12 +254,11 @@ cd build && make -j$(nproc)
 
 | Bias Type | Leaked Bits | Signatures | Expected Method | Notes |
 |-----------|-------------|------------|------------------|-------|
-| MSB       | 12–16       | 800–2000   | Lattice          | Fast recovery |
-| MSB       | 8           | 3000–5000  | Lattice          | Works reliably |
-| LSB       | 8           | 3000–5000  | Lattice          | Works |
-| MODULO    | ~8          | 20k–50k    | Lattice          | Primary benchmark |
-| MSB       | 4           | 20k+       | Lattice (auto-sized) | Slower |
-| Very low  | 1–2         | 50k–100k+  | FFT (auto)       | Very large files |
+| MSB/LSB   | ≥ 7         | 500–2000   | Lattice (LLL)    | Fast, seconds |
+| MSB/LSB   | 5–6         | ~1000–2000 | Lattice (BKZ b=30) | Tens of sec to ~2 min |
+| MSB/LSB   | 4           | ~2000      | Lattice (BKZ b=30) | Best-effort, few min, not guaranteed for every key |
+| MSB/LSB   | ≤ 3         | —          | —                | Out of reach in practice (see README feasibility notes) |
+| MODULO    | any         | —          | —                | Not implemented (`detect_modulo_bias` is a stub) |
 | none      | 0           | any        | Reports failure  | No false positives |
 
 ## 12. Troubleshooting

@@ -20,7 +20,6 @@ private:
     Telemetry& tel_;
 
     std::optional<mpz> try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
-    std::optional<mpz> try_fft(const std::vector<Pair>& pairs, const BiasProfile& bias);
     std::optional<mpz> try_fallback_ladder(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
 
     bool dispatch_and_recover(

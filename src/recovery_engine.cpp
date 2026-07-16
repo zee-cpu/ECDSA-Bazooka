@@ -1,6 +1,5 @@
 #include "recovery_engine.h"
 #include "lattice_solver.h"
-#include "fft_solver.h"
 #include "verifier.h"
 #include "bias_profiler.h"
 #include "utils.h"
@@ -17,14 +16,6 @@ std::optional<mpz> RecoveryEngine::try_lattice(const std::vector<Pair>& pairs, c
     tel_.method_chosen = true;
 
     return LatticeSolver::recover_private_key(pairs, bias, max_sigs, &tel_, pubkey_hint);
-}
-
-std::optional<mpz> RecoveryEngine::try_fft(const std::vector<Pair>& pairs, const BiasProfile& bias) {
-    tel_.set_phase("FFT recovery (Bleichenbacher)");
-    tel_.active_method = static_cast<int>(RecoveryMethod::FFT);
-    tel_.method_chosen = true;
-
-    return FFTSolver::recover_private_key(pairs, bias, &tel_);
 }
 
 std::optional<mpz> RecoveryEngine::try_fallback_ladder(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint) {
@@ -109,8 +100,6 @@ bool RecoveryEngine::dispatch_and_recover(
                 candidate = alt_cand;
             }
         }
-    } else if (chosen == RecoveryMethod::FFT) {
-        candidate = try_fft(pairs, profile);
     } else {
         candidate = try_fallback_ladder(pairs, profile, max_sigs, pubkey_hint);
     }

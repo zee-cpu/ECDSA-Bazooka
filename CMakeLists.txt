@@ -10,7 +10,6 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(GMP REQUIRED gmp)
 pkg_check_modules(GMPXX REQUIRED gmpxx)
-pkg_check_modules(FFTW3 REQUIRED fftw3)
 
 # fplll
 pkg_check_modules(FPLLL REQUIRED fplll)
@@ -24,7 +23,6 @@ add_executable(ecdsa_nonce_recovery
     src/pair_computation.cpp
     src/bias_profiler.cpp
     src/lattice_solver.cpp
-    src/fft_solver.cpp
     src/recovery_engine.cpp
     src/telemetry.cpp
     src/verifier.cpp
@@ -37,14 +35,12 @@ target_include_directories(ecdsa_nonce_recovery PRIVATE
     ${GMP_INCLUDE_DIRS}
     ${GMPXX_INCLUDE_DIRS}
     ${FPLLL_INCLUDE_DIRS}
-    ${FFTW3_INCLUDE_DIRS}
 )
 
 target_link_libraries(ecdsa_nonce_recovery PRIVATE
     ${GMP_LIBRARIES}
     ${GMPXX_LIBRARIES}
     ${FPLLL_LIBRARIES}
-    ${FFTW3_LIBRARIES}
     Threads::Threads
 )
 

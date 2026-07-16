@@ -3,7 +3,6 @@
 #include "pair_computation.h"
 #include "recovery_engine.h"
 #include "telemetry.h"
-#include "fft_solver.h"
 #include "utils.h"
 #include <iostream>
 #include <string>
@@ -12,11 +11,11 @@
 #include <cstdlib>
 
 static void print_usage(const char* prog) {
-    std::cout << "ECDSA Nonce-Bias Key Recovery Engine (Hybrid Lattice + Bleichenbacher FFT)\n\n";
+    std::cout << "ECDSA Nonce-Bias Key Recovery Engine (Lattice HNP: LLL/BKZ)\n\n";
     std::cout << "Usage: " << prog << " [options] <input.txt>\n\n";
     std::cout << "Options:\n";
     std::cout << "  -i, --input FILE       Input signature file (required)\n";
-    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fft | fallback (default: auto)\n";
+    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fallback (default: auto)\n";
     std::cout << "  -s, --max-sigs N       Maximum signatures to use\n";
     std::cout << "  -t, --max-time SEC     Max time budget (seconds)\n";
     std::cout << "  -v, --verbose          Enable live telemetry dashboard\n";
@@ -29,7 +28,6 @@ static void print_usage(const char* prog) {
 
 RecoveryMethod parse_method(const std::string& s) {
     if (s == "lattice") return RecoveryMethod::LATTICE;
-    if (s == "fft") return RecoveryMethod::FFT;
     if (s == "fallback") return RecoveryMethod::FALLBACK;
     return RecoveryMethod::AUTO;
 }
@@ -95,15 +93,6 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 1;
     }
-
-    // Run the required round-trip test early (spec requirement)
-    std::cout << "=== Running mandatory FFT grid round-trip test ===\n";
-    bool rt_ok = FFTSolver::run_roundtrip_test(5000);
-    if (!rt_ok) {
-        std::cerr << "FATAL: FFT round-trip test failed. Refusing to continue (spec requirement).\n";
-        return 2;
-    }
-    std::cout << "FFT round-trip PASSED.\n\n";
 
     Telemetry telemetry;
     telemetry.reset();
@@ -181,7 +170,6 @@ int main(int argc, char** argv) {
         auto method_name = [](RecoveryMethod m) {
             switch (m) {
                 case RecoveryMethod::LATTICE: return "LATTICE";
-                case RecoveryMethod::FFT: return "FFT";
                 case RecoveryMethod::FALLBACK: return "FALLBACK";
                 default: return "UNKNOWN";
             }

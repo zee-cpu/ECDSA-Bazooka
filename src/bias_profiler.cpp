@@ -87,8 +87,8 @@ std::pair<double, double> shrink_test_sweep(
     // re-tested partly against the exact points it was fit to, which can
     // manufacture a spuriously tiny p-value for a candidate that is
     // actually wrong (the same failure category as the tautological
-    // checks fixed elsewhere in this project's history -- see HANDOFF.md
-    // items 1 and 4 -- just resurfacing here via broken disjointness
+    // held-out and signature-recompute checks fixed earlier in this
+    // project's history -- just resurfacing here via broken disjointness
     // instead of an outright self-check). Splitting once up front and
     // drawing every subsample from its own half guarantees zero overlap
     // regardless of input size.

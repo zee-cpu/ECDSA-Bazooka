@@ -63,7 +63,6 @@ struct BiasProfile {
 enum class RecoveryMethod {
     AUTO,
     LATTICE,
-    FFT,
     FALLBACK
 };
 
@@ -94,9 +93,6 @@ struct Telemetry {
     std::atomic<int> current_block_size{0};
 
     std::atomic<bool> lattice_in_progress{false};
-    std::atomic<bool> fft_in_progress{false};
-    std::atomic<double> fft_peak_magnitude{0.0};
-    std::atomic<size_t> fft_sweep_progress{0};
 
     std::atomic<bool> verification_passed{false};
     std::atomic<bool> recovery_complete{false};
@@ -155,9 +151,6 @@ struct Telemetry {
         current_leak_l = 0;
         current_block_size = 0;
         lattice_in_progress = false;
-        fft_in_progress = false;
-        fft_peak_magnitude = 0.0;
-        fft_sweep_progress = 0;
         verification_passed = false;
         recovery_complete = false;
         {

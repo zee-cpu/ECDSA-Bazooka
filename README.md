@@ -1,9 +1,9 @@
 # ECDSA Nonce-Bias Recovery Tool
 
-A wallet-recovery firm's internal tool: given a set of real ECDSA signatures
-from the same private key where the nonce (`k`) has some kind of statistical
-bias (MSB, LSB, or weak/soft bias), detect the bias and recover the private
-key. Core approach: eliminate the private key `d` algebraically via a
+Given a set of real ECDSA signatures from the same private key where the nonce
+(`k`) has some kind of statistical bias (MSB, LSB, or weak/soft bias), detect
+the bias and recover the private key. Core approach: eliminate the private key
+`d` algebraically via a
 pivot-elimination trick across signature pairs, reducing to a Hidden Number
 Problem in one small unknown, solved via lattice reduction (LLL/BKZ) with a
 Kannan CVP-to-SVP embedding.
@@ -48,6 +48,20 @@ both MSB and LSB bias:
 Give weak-bias cases a generous `--max-time` (e.g. `-t 400`): the L = 4-6 BKZ
 pass is budget-gated and is skipped if it cannot fit the remaining time.
 
+## Concurrency
+
+Lattice reductions run **serially by design**. The independent trials look
+parallelizable, but fplll is not thread-safe for concurrent reductions (its LLL
+wrapper mutates a process-global MPFR precision, and BKZ calls LLL internally),
+so running two at once races and crashes. A threaded version was built and
+reverted for this reason. The only safe way to parallelize would be process
+(`fork`) isolation, one fplll per worker — not threads.
+
+The fplll BKZ pruning-strategy file is located via the `ECDSA_FPLLL_STRATEGY`
+environment variable if set, otherwise the standard install prefixes. Recovery
+still works without it (falling back to slower unpruned enumeration), so it is
+an optimization, not a hard dependency.
+
 ## Testing
 
 ```bash
@@ -62,7 +76,7 @@ ctest -R e2e_recovery                # slow (~5min): real recovery against real 
   before touching it.
 - `src/bias_profiler.cpp` -- bias detection; `shrink_test_sweep` is the
   shared core used by both MSB and LSB detection.
-- `src/recovery_engine.cpp` -- dispatch (LATTICE vs FALLBACK vs FFT),
+- `src/recovery_engine.cpp` -- dispatch (LATTICE vs FALLBACK),
   candidate verification, retry logic.
 - `src/verifier.cpp` -- genuine independent ECDSA verification.
 - `src/secp256k1.cpp` -- EC primitives.

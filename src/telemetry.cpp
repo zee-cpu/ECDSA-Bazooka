@@ -194,7 +194,6 @@ void TelemetryRenderer::render_dashboard() {
     if (method_chosen) {
         mname = "AUTO";
         if (meth == static_cast<int>(RecoveryMethod::LATTICE)) mname = "LATTICE";
-        else if (meth == static_cast<int>(RecoveryMethod::FFT)) mname = "FFT";
         else if (meth == static_cast<int>(RecoveryMethod::FALLBACK)) mname = "FALLBACK";
     }
 
@@ -203,7 +202,6 @@ void TelemetryRenderer::render_dashboard() {
     double attempt_frac = total > 0 ? static_cast<double>(attempt) / total : 0.0;
 
     bool lattice_active = tel_.lattice_in_progress.load();
-    bool fft_active = tel_.fft_in_progress.load();
 
     std::string phase = tel_.get_phase();
     std::string status = tel_.get_status();
@@ -292,9 +290,6 @@ void TelemetryRenderer::render_dashboard() {
                 << (bs > 0 ? (" BKZ b=" + std::to_string(bs)) : " LLL")
                 << " dim=" << tel_.lattice_dim.load()
                 << " sigs=" << tel_.signatures_used.load() << RESET;
-        } else if (fft_active) {
-            oss << "  " << DIM << "FFT peak=" << std::fixed << std::setprecision(0)
-                << tel_.fft_peak_magnitude.load() << " sweep=" << tel_.fft_sweep_progress.load() << "%" << RESET;
         } else {
             oss << "  " << DIM << "-" << RESET;
         }

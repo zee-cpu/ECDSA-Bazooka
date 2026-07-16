@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <cstdlib>
 
 using namespace fplll;
 
@@ -19,8 +20,9 @@ using namespace fplll;
 // Raised to 320 so the Phase-2 plan below can provision the mid range
 // (L=4..6): L=5/L=6 resolve robustly at block 30, L=4 is best-effort with a
 // pair of dimension shots up to ~300. L<=3 needs both higher dimension *and*
-// a larger block size than block 30, so it stays out of reach; see HANDOFF.md
-// for the full frontier data. The time-budget guards further down still stop
+// a larger block size than block 30, so it stays out of reach (the full
+// frontier data is in the project's internal design notes). The time-budget
+// guards further down still stop
 // any single trial that won't fit --max-time from starting, so a bigger
 // ceiling costs nothing when the budget is tight.
 constexpr size_t TRAIN_M_CAP = 320;
@@ -46,13 +48,25 @@ namespace {
 // Cached: the JSON is parsed once on first use and reused. Phase 2 issues
 // several BKZ reductions per recovery, so re-reading the strategy file from
 // disk on every call (the old behaviour) was pointless I/O in a hot path.
+//
+// Path resolution order: the ECDSA_FPLLL_STRATEGY env var (an explicit
+// override, so packagers/CI can point at a strategy file that isn't in a
+// standard prefix) is tried first, then the usual install locations. The
+// hard-coded absolute paths were previously the *only* way to find the file,
+// which made the build brittle across distros/prefixes; the override removes
+// that as a single point of failure without changing default behaviour.
 const std::vector<fplll::Strategy>& load_bkz_pruning_strategies() {
     static const std::vector<fplll::Strategy> cached = []() {
-        static const std::vector<std::string> candidates = {
+        std::vector<std::string> candidates;
+        if (const char* env = std::getenv("ECDSA_FPLLL_STRATEGY");
+            env != nullptr && env[0] != '\0') {
+            candidates.emplace_back(env);
+        }
+        candidates.insert(candidates.end(), {
             "/usr/local/share/fplll/strategies/default.json",
             "/usr/share/fplll/strategies/default.json",
             "/usr/share/libfplll8/strategies/default.json",
-        };
+        });
         for (const auto& path : candidates) {
             try {
                 return fplll::load_strategies_json(path);
@@ -359,8 +373,8 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     if (leaked < 1.0) leaked = 8.0;
 
     // Recovery runs in two phases, because the leak levels split cleanly by
-    // what reduction they need (measured directly -- see HANDOFF.md frontier
-    // data):
+    // what reduction they need (measured directly against real ground-truth
+    // fixtures; the full frontier data lives in the project's design notes):
     //   * Strong/moderate bias (L>=7) resolves under plain LLL at modest
     //     dimension in well under a second.
     //   * The mid range (L=4..6) will NOT resolve under LLL at any dimension
@@ -371,6 +385,15 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     // and Phase 2 is a small, ordered BKZ sweep over just the mid range at
     // full per-L dimension. Keeping Phase 2 small is deliberate: a broad
     // high-dimension BKZ sweep would blow any realistic --max-time budget.
+    //
+    // Concurrency: these trials are independent and look parallelizable, but
+    // the reductions run STRICTLY SERIALLY on purpose. fplll is not thread-safe
+    // for concurrent reductions -- its LLL Wrapper auto-adjusts a *process-global*
+    // MPFR precision, and BKZ calls LLL internally, so two reductions in flight
+    // race on that global and crash non-deterministically. A thread-pool version
+    // was built and reverted for exactly this reason. If this is ever
+    // parallelized, the only safe route is process-based (fork) isolation so
+    // each worker gets its own fplll globals -- not threads.
     int base_l = std::max(2, static_cast<int>(std::round(leaked)));
 
     mpz best_cand(0);
@@ -492,8 +515,8 @@ std::optional<mpz> LatticeSolver::recover_private_key(
     // solves, 281 misses, 301 solves) -- so it gets two independent
     // dimensions as a best-effort. L<=3 is deliberately absent: it needs
     // block_size >= 40 at dim >= 450, which does not finish in 15+ minutes,
-    // and L<=2 does not converge at all in practice (see HANDOFF.md frontier
-    // data). Kept short on purpose -- a broad high-dimension BKZ sweep would
+    // and L<=2 does not converge at all in practice (measured; see the
+    // project's design notes). Kept short on purpose -- a broad high-dimension BKZ sweep would
     // blow any realistic --max-time. Early-returns the instant a candidate
     // verifies against the pubkey.
     //
