@@ -40,7 +40,15 @@ for case in "msb:12:500:11" "msb:16:400:12" "msb:8:1200:13" "lsb:12:500:31" "lsb
                     --output "$f" --seed "$seed" 2>&1)
     gt=$(echo "$gen_out" | grep -oE '0x[0-9a-fA-F]+' | head -1)
 
-    run_out=$(timeout 120 "$BINARY" -i "$f" -q 2>&1)
+    # Pass an explicit -t, same as the unbiased case below. Without a budget,
+    # remaining_budget_seconds() returns the unlimited sentinel and the budget-
+    # fit guards go inert, so the sweep over-explores (higher L, BKZ escalation)
+    # chasing more confidence than a strong-bias recovery needs -- which made
+    # these cases run *longer* than a bounded run and get killed by the outer
+    # timeout on slower machines, reported as a spurious FAIL. With -t the binary
+    # converges in ~30-35s. Outer timeout stays larger as a safety net (a single
+    # fplll reduction can't be interrupted mid-call).
+    run_out=$(timeout 130 "$BINARY" -i "$f" -q -t 90 2>&1)
     recovered=$(echo "$run_out" | grep -oE '^\s*d = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
 
     echo "$run_out" | grep -q '\[SUCCESS\]'
