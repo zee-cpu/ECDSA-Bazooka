@@ -92,3 +92,7 @@ end-to-end recovery smoke test. Sanitizer builds are available locally via
 ## More context
 
 - `COMMANDS.md` -- complete CLI reference and build prerequisites.
+
+## License
+
+Released under the MIT License. See [`LICENSE`](LICENSE).
