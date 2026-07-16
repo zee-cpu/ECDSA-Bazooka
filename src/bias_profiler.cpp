@@ -7,6 +7,7 @@
 #include <random>
 #include <vector>
 #include <functional>
+#include <tuple>
 #include <iostream>
 
 using namespace fplll;
@@ -44,6 +45,22 @@ const double TARGET_FALSE_POSITIVE_RATE = 1e-9;
 // separate and larger -- see lattice_solver.cpp.)
 constexpr size_t TRAIN_M_CAP = 120;
 
+// Phase 6e: total number of independent train/held-out partitions available to
+// the detector. A single arbitrary split can be unlucky on borderline bias --
+// its training slice fails to resolve a candidate, or its held-out draw doesn't
+// quite clear significance -- yielding a false negative that a different split
+// would have caught. profile() uses these in two stages: stage 1 evaluates only
+// partition 0 (the old single-split detector) for both hypotheses; stage 2
+// evaluates partitions 1..R-1, but ONLY if stage 1 found nothing at all. So
+// strong bias (found on partition 0) costs exactly one split -- no slower than
+// before, and the extra partitions never touch the recovery budget -- while
+// borderline / no-bias inputs get up to R independent chances (bounded by the
+// run's time budget). Crucially this does NOT relax the false-positive rate:
+// the Bonferroni family in shrink_test_sweep is the full R*leak_trials, so the
+// family-wise TARGET_FALSE_POSITIVE_RATE holds regardless of how many
+// partitions actually run.
+constexpr int DETECTION_ENSEMBLE_SPLITS = 5;
+
 // Shared detector core: for each candidate leak-bit value (ascending), build
 // the (possibly pre-transformed) HNP lattice on a small training subsample
 // and extract a candidate d using the same reduce_and_extract logic actual
@@ -69,109 +86,128 @@ std::pair<double, double> shrink_test_sweep(
     const std::vector<int>& leak_trials,
     const std::function<std::vector<Pair>(const std::vector<Pair>&, int)>& transform,
     const std::function<int(const mpz&)>& measure_bits,
-    std::mt19937_64& rng,
+    uint64_t base_seed,
+    int r_begin,
+    int r_end,
     Telemetry* telemetry
 ) {
     // Bonferroni correction: split the target false-positive rate across
-    // every trial actually attempted in this sweep, so running a denser
-    // sweep doesn't itself inflate the false-positive rate.
-    double corrected_alpha = TARGET_FALSE_POSITIVE_RATE / std::max<size_t>(1, leak_trials.size());
+    // every test in the *full* family -- both the L values swept AND all R
+    // partitions (Phase 6e) -- even when this call only evaluates a subset of
+    // partitions. Using the full R here keeps the family-wise
+    // TARGET_FALSE_POSITIVE_RATE exact regardless of how profile() splits the
+    // partitions across its two-phase calls or how early it stops.
+    const int R = DETECTION_ENSEMBLE_SPLITS;
+    double corrected_alpha =
+        TARGET_FALSE_POSITIVE_RATE / std::max<size_t>(1, leak_trials.size() * R);
 
-    // Partition ONCE into disjoint training and held-out pools. Previously
-    // train0/test_set/measure_set were each drawn independently from the
-    // *same* full `pairs` via sample_pairs, so for small inputs (test_n
-    // capped at 2000, measure_n at 5000, but pairs.size() often far
-    // smaller -- e.g. a real 59-signature file) the "held-out" set could
-    // equal the entire dataset, overlapping training completely. A
-    // candidate that overfits noise in a small training slice then gets
-    // re-tested partly against the exact points it was fit to, which can
-    // manufacture a spuriously tiny p-value for a candidate that is
-    // actually wrong (the same failure category as the tautological
-    // held-out and signature-recompute checks fixed earlier in this
-    // project's history -- just resurfacing here via broken disjointness
-    // instead of an outright self-check). Splitting once up front and
-    // drawing every subsample from its own half guarantees zero overlap
-    // regardless of input size.
-    std::vector<Pair> shuffled = pairs;
-    std::shuffle(shuffled.begin(), shuffled.end(), rng);
-    size_t split = shuffled.size() / 2;
-    std::vector<Pair> train_pool(shuffled.begin(), shuffled.begin() + split);
-    std::vector<Pair> held_out_pool(shuffled.begin() + split, shuffled.end());
-
-    for (int L : leak_trials) {
+    for (int r = r_begin; r < r_end; ++r) {
         if (telemetry && telemetry->deadline_exceeded()) break;
 
-        // Detection sizing: LLL-only, so this only needs enough dimension to
-        // confirm the strong/moderate range it can actually resolve. ~320/L
-        // floored at 80, capped at TRAIN_M_CAP (weak L is left to FALLBACK's
-        // BKZ recovery, not detected here -- see TRAIN_M_CAP note above).
-        size_t train_m = std::min({train_pool.size(), TRAIN_M_CAP,
-                          std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / L)))});
-        if (train_m < 20) continue;
+        // Per-partition RNG is a pure function of (base_seed, r): partition 0
+        // uses base_seed directly, reproducing the old single-split detector
+        // *exactly* (zero regression), while each extra partition gets an
+        // independent, deterministic seed. Deriving from (base_seed, r) rather
+        // than a running stream makes the two-phase call structure in profile()
+        // -- partition 0 first, extra partitions only as a fallback -- fully
+        // reproducible run-to-run and independent of --seed.
+        std::mt19937_64 prng(r == 0 ? base_seed
+            : base_seed + 0x9E3779B97F4A7C15ULL * static_cast<uint64_t>(r + 1));
 
-        // See the matching guard in lattice_solver.cpp: a single
-        // large-dimension LLL reduction can itself take minutes with no
-        // way to interrupt it mid-call, so skip starting one that clearly
-        // won't fit the remaining budget rather than blowing past it.
-        if (telemetry) {
-            double remaining = telemetry->remaining_budget_seconds();
-            if (train_m > 100 && remaining < 60.0) continue;
+        // Partition into disjoint training and held-out pools. Previously
+        // train0/test_set/measure_set were each drawn independently from the
+        // *same* full `pairs`, so for small inputs the "held-out" set could
+        // equal the entire dataset, overlapping training completely -- a
+        // candidate that overfits noise in a small training slice then gets
+        // re-tested partly against the exact points it was fit to, which can
+        // manufacture a spuriously tiny p-value for a wrong candidate.
+        // Splitting once per partition and drawing every subsample from its
+        // own half guarantees zero overlap regardless of input size.
+        std::vector<Pair> shuffled = pairs;
+        std::shuffle(shuffled.begin(), shuffled.end(), prng);
+        size_t split = shuffled.size() / 2;
+        std::vector<Pair> train_pool(shuffled.begin(), shuffled.begin() + split);
+        std::vector<Pair> held_out_pool(shuffled.begin() + split, shuffled.end());
+
+        for (int L : leak_trials) {
+            if (telemetry && telemetry->deadline_exceeded()) break;
+
+            // Detection sizing: LLL-only, so this only needs enough dimension
+            // to confirm the strong/moderate range it can actually resolve.
+            // ~320/L floored at 80, capped at TRAIN_M_CAP (weak L is left to
+            // FALLBACK's BKZ recovery, not detected here).
+            size_t train_m = std::min({train_pool.size(), TRAIN_M_CAP,
+                              std::max<size_t>(80, static_cast<size_t>(std::ceil(320.0 / L)))});
+            if (train_m < 20) continue;
+
+            // See the matching guard in lattice_solver.cpp: a single
+            // large-dimension LLL reduction can itself take minutes with no
+            // way to interrupt it mid-call, so skip starting one that clearly
+            // won't fit the remaining budget rather than blowing past it.
+            if (telemetry) {
+                double remaining = telemetry->remaining_budget_seconds();
+                if (train_m > 100 && remaining < 60.0) continue;
+            }
+
+            auto train0 = sample_pairs(train_pool, train_m, prng);
+            auto train = transform(train0, L);
+
+            ZZ_mat<mpz_t> basis;
+            mpz scaling;
+            if (!LatticeSolver::build_boneh_venkatesan_basis(train, L, basis, scaling)) continue;
+
+            auto cand = LatticeSolver::reduce_and_extract(basis, train, nullptr);
+            if (!cand.has_value()) continue;
+
+            // Use as much held-out data as available (capped for runtime) --
+            // the significance test below is exact for whatever size we get.
+            // Drawn from held_out_pool only -- disjoint from every training
+            // draw above, for any L in this partition.
+            size_t test_n = std::min(held_out_pool.size(), static_cast<size_t>(2000));
+            auto test_set = sample_pairs(held_out_pool, test_n, prng);
+
+            int count = 0;
+            for (const auto& p : test_set) {
+                mpz k = utils::mod_add(p.w, utils::mod_mul(p.x, *cand, SECP256K1_N), SECP256K1_N);
+                if (measure_bits(k) >= L) count++;
+            }
+
+            double expected_rate = std::pow(2.0, -L);
+            double lambda_null = test_set.size() * expected_rate; // expected count if candidate is wrong
+            double p_value = utils::poisson_upper_tail(count, lambda_null);
+
+            if (p_value >= corrected_alpha) continue;
+
+            // This partition detected: measure the actual magnitude directly
+            // from data, again from the same disjoint held-out pool.
+            size_t measure_n = std::min(held_out_pool.size(), static_cast<size_t>(5000));
+            auto measure_set = sample_pairs(held_out_pool, measure_n, prng);
+
+            std::vector<int> bits_observed;
+            bits_observed.reserve(measure_set.size());
+            for (const auto& p : measure_set) {
+                mpz k = utils::mod_add(p.w, utils::mod_mul(p.x, *cand, SECP256K1_N), SECP256K1_N);
+                bits_observed.push_back(measure_bits(k));
+            }
+            std::sort(bits_observed.begin(), bits_observed.end());
+
+            // The bias guarantees *every* nonce has at least the true bit-count,
+            // so the low end of this empirical distribution sits right at the
+            // true value. A low percentile (rather than the strict minimum)
+            // guards against a single unlucky outlier understating it.
+            size_t idx = static_cast<size_t>(bits_observed.size() * 0.02);
+            idx = std::min(idx, bits_observed.size() - 1);
+            double estimated_bits = bits_observed[idx];
+            double confidence = -std::log10(std::max(p_value, 1e-300));
+
+            // First partition to clear wins. Strong bias is found on partition
+            // 0, so the common path costs exactly one split -- no slower than
+            // the old single-split detector -- while borderline bias that an
+            // unlucky split would miss gets up to R independent chances. The
+            // R-widened Bonferroni above bounds the family-wise false-positive
+            // rate whether we stop here or exhaust all R partitions.
+            return {estimated_bits, confidence};
         }
-
-        auto train0 = sample_pairs(train_pool, train_m, rng);
-        auto train = transform(train0, L);
-
-        ZZ_mat<mpz_t> basis;
-        mpz scaling;
-        if (!LatticeSolver::build_boneh_venkatesan_basis(train, L, basis, scaling)) continue;
-
-        auto cand = LatticeSolver::reduce_and_extract(basis, train, nullptr);
-        if (!cand.has_value()) continue;
-
-        // Use as much held-out data as available (capped for runtime) --
-        // the significance test below is exact for whatever size we get,
-        // so there's no need to hand-tune it to a specific test_n. Drawn
-        // from held_out_pool only -- disjoint from every training draw
-        // above, for any L in this sweep.
-        size_t test_n = std::min(held_out_pool.size(), static_cast<size_t>(2000));
-        auto test_set = sample_pairs(held_out_pool, test_n, rng);
-
-        int count = 0;
-        for (const auto& p : test_set) {
-            mpz k = utils::mod_add(p.w, utils::mod_mul(p.x, *cand, SECP256K1_N), SECP256K1_N);
-            if (measure_bits(k) >= L) count++;
-        }
-
-        double expected_rate = std::pow(2.0, -L);
-        double lambda_null = test_set.size() * expected_rate; // expected count if candidate is wrong
-        double p_value = utils::poisson_upper_tail(count, lambda_null);
-
-        if (p_value >= corrected_alpha) continue;
-
-        // Detected: now measure the actual magnitude directly from data,
-        // again from the same disjoint held-out pool.
-        size_t measure_n = std::min(held_out_pool.size(), static_cast<size_t>(5000));
-        auto measure_set = sample_pairs(held_out_pool, measure_n, rng);
-
-        std::vector<int> bits_observed;
-        bits_observed.reserve(measure_set.size());
-        for (const auto& p : measure_set) {
-            mpz k = utils::mod_add(p.w, utils::mod_mul(p.x, *cand, SECP256K1_N), SECP256K1_N);
-            bits_observed.push_back(measure_bits(k));
-        }
-        std::sort(bits_observed.begin(), bits_observed.end());
-
-        // The bias guarantees *every* nonce has at least the true bit-count,
-        // so the low end of this empirical distribution sits right at the
-        // true value. A low percentile (rather than the strict minimum)
-        // guards against a single unlucky outlier understating it, and
-        // naturally tightens as more held-out data becomes available.
-        size_t idx = static_cast<size_t>(bits_observed.size() * 0.02);
-        idx = std::min(idx, bits_observed.size() - 1);
-        double estimated_bits = bits_observed[idx];
-        double confidence = -std::log10(std::max(p_value, 1e-300));
-
-        return {estimated_bits, confidence};
     }
 
     return {0.0, 0.0};
@@ -195,8 +231,24 @@ BiasProfile BiasProfiler::profile(const std::vector<Pair>& pairs, Telemetry* tel
     size_t sample_size = std::min<size_t>(pairs.size(), 4500);
     auto sampled = sample_pairs(pairs, sample_size, rng);
 
-    auto [msb_bits, msb_conf] = detect_msb_bias(sampled, telemetry);
-    auto [lsb_bits, lsb_conf] = detect_lsb_bias(sampled, telemetry);
+    // Phase 6e detection is two-stage, to stay cheap on strong bias while
+    // being thorough on borderline bias. Stage 1 evaluates only partition 0 of
+    // each hypothesis -- exactly the old single-split detector -- so any input
+    // that detected before detects here at the same cost, never touching the
+    // recovery budget. Stage 2 runs the extra ensemble partitions, but ONLY if
+    // stage 1 found nothing at all: that is the borderline/no-bias case where a
+    // single unlucky split can miss genuine-but-weak bias, and where there's no
+    // recovery to protect anyway. Strong bias never reaches stage 2, which is
+    // what fixes the regression where a non-matching detector's ensemble ran
+    // the full R-split sweep and starved recovery.
+    double msb_bits, msb_conf, lsb_bits, lsb_conf;
+    std::tie(msb_bits, msb_conf) = detect_msb_bias(sampled, telemetry);
+    std::tie(lsb_bits, lsb_conf) = detect_lsb_bias(sampled, telemetry);
+    if (msb_bits == 0.0 && lsb_bits == 0.0) {
+        std::tie(msb_bits, msb_conf) = detect_msb_bias(sampled, telemetry, /*extra_splits=*/true);
+        if (msb_bits == 0.0)
+            std::tie(lsb_bits, lsb_conf) = detect_lsb_bias(sampled, telemetry, /*extra_splits=*/true);
+    }
 
     // Both detectors run the identical significance test on the identical
     // data, just after a different (identity vs 2^-b) transform, so their
@@ -234,10 +286,12 @@ BiasProfile BiasProfiler::profile(const std::vector<Pair>& pairs, Telemetry* tel
 // Trial-reduction MSB bias detector. See shrink_test_sweep() above for the
 // mechanism (previously this guessed a candidate d from a single signature
 // assuming k=0, which is tautological -- see git history / earlier notes).
-std::pair<double, double> BiasProfiler::detect_msb_bias(const std::vector<Pair>& pairs, Telemetry* telemetry) {
+std::pair<double, double> BiasProfiler::detect_msb_bias(const std::vector<Pair>& pairs, Telemetry* telemetry, bool extra_splits) {
     if (pairs.size() < 20) return {0.0, 0.0};
 
-    std::mt19937_64 rng(0xC0FFEEULL ^ static_cast<uint64_t>(pairs.size()));
+    // Fixed per-detector base seed (independent of --seed); shrink_test_sweep
+    // derives each partition's RNG from it deterministically.
+    uint64_t base = 0xC0FFEEULL ^ static_cast<uint64_t>(pairs.size());
     // L=1 excluded: see TRAIN_M_CAP comment above -- its ~320-signature
     // requirement is far past the cap, so it has no realistic chance of
     // resolving and would just burn the time budget.
@@ -253,8 +307,11 @@ std::pair<double, double> BiasProfiler::detect_msb_bias(const std::vector<Pair>&
     };
     // The significance gate (Bonferroni-corrected Poisson tail test against
     // TARGET_FALSE_POSITIVE_RATE) already lives inside shrink_test_sweep,
-    // so a nonzero result here means a trial actually cleared it.
-    return shrink_test_sweep(pairs, leak_trials, identity, measure_bits, rng, telemetry);
+    // so a nonzero result here means a trial actually cleared it. Stage 1
+    // (extra_splits=false) runs partition 0; stage 2 runs partitions 1..R-1.
+    int r_begin = extra_splits ? 1 : 0;
+    int r_end = extra_splits ? DETECTION_ENSEMBLE_SPLITS : 1;
+    return shrink_test_sweep(pairs, leak_trials, identity, measure_bits, base, r_begin, r_end, telemetry);
 }
 
 // LSB bias detector: reuses the identical MSB machinery after transforming
@@ -262,10 +319,10 @@ std::pair<double, double> BiasProfiler::detect_msb_bias(const std::vector<Pair>&
 // exact multiple of 2^b, the transformed k' = k / 2^b is a genuinely small
 // integer with exactly the same bound an MSB-biased nonce would have, so
 // the same lattice + shuffled-null significance test applies unchanged.
-std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>& pairs, Telemetry* telemetry, int max_bits) {
+std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>& pairs, Telemetry* telemetry, bool extra_splits, int max_bits) {
     if (pairs.size() < 20) return {0.0, 0.0};
 
-    std::mt19937_64 rng(0xBEEFULL ^ static_cast<uint64_t>(pairs.size()));
+    uint64_t base = 0xBEEFULL ^ static_cast<uint64_t>(pairs.size());
     std::vector<int> leak_trials;
     // L=1 excluded: see TRAIN_M_CAP comment above -- its ~320-signature
     // requirement is far past the cap, so it has no realistic chance of
@@ -285,7 +342,9 @@ std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>&
         unsigned long tz = mpz_scan1(k.get_mpz_t(), 0);
         return static_cast<int>(std::min<unsigned long>(tz, 256));
     };
-    return shrink_test_sweep(pairs, leak_trials, transform, measure_bits, rng, telemetry);
+    int r_begin = extra_splits ? 1 : 0;
+    int r_end = extra_splits ? DETECTION_ENSEMBLE_SPLITS : 1;
+    return shrink_test_sweep(pairs, leak_trials, transform, measure_bits, base, r_begin, r_end, telemetry);
 }
 
 
