@@ -150,11 +150,16 @@ struct Telemetry {
     // reproduced exactly.
     std::atomic<uint64_t> sampling_seed{DEFAULT_SAMPLING_SEED};
 
+    double elapsed_seconds() const {
+        std::lock_guard<std::mutex> lock(str_mutex);
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start_time).count();
+    }
+
     bool deadline_exceeded() const {
         double budget = time_budget_sec.load();
         if (budget <= 0.0) return false;
-        double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - start_time).count();
+        double elapsed = elapsed_seconds();
         return elapsed >= budget;
     }
 
@@ -167,8 +172,7 @@ struct Telemetry {
     double remaining_budget_seconds() const {
         double budget = time_budget_sec.load();
         if (budget <= 0.0) return 1e18;
-        double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - start_time).count();
+        double elapsed = elapsed_seconds();
         return budget - elapsed;
     }
 
@@ -208,8 +212,8 @@ struct Telemetry {
             status_message.clear();
             recovered_key_hex.clear();
             error_message.clear();
+            start_time = std::chrono::steady_clock::now();
         }
-        start_time = std::chrono::steady_clock::now();
     }
 
     void set_phase(const std::string& phase) {

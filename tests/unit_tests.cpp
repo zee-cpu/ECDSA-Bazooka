@@ -16,6 +16,7 @@
 #include <iostream>
 #include <cmath>
 #include <random>
+#include <thread>
 #include <type_traits>
 #include <vector>
 #include <algorithm>
@@ -804,6 +805,37 @@ void test_input_validation_and_grouping() {
 }
 
 // ---------------------------------------------------------------------
+// Telemetry timing is read by the live renderer while RecoveryEngine resets
+// the same object. Exercise the public timing API concurrently so ThreadSanitizer
+// can prove the start-time state is synchronized.
+// ---------------------------------------------------------------------
+void test_telemetry_timing() {
+    std::cout << "-- telemetry timing synchronization --\n";
+    Telemetry tel;
+    tel.reset();
+    tel.time_budget_sec = 1.0;
+
+    std::atomic<bool> stop{false};
+    std::atomic<bool> valid{true};
+    std::thread reader([&]() {
+        while (!stop.load()) {
+            if (tel.elapsed_seconds() < 0.0) valid = false;
+            (void)tel.deadline_exceeded();
+            (void)tel.remaining_budget_seconds();
+        }
+    });
+
+    for (int i = 0; i < 1000; ++i) {
+        tel.reset();
+        tel.time_budget_sec = 1.0;
+    }
+    stop = true;
+    reader.join();
+
+    check(valid.load(), "concurrent telemetry timing reads remain valid across reset");
+}
+
+// ---------------------------------------------------------------------
 // secp256k1 point-arithmetic edge cases (Phase 4). Self-contained algebraic
 // invariants that don't need an external reference; the exhaustive random
 // cross-check against the `ecdsa` library lives in the ctest `ecc_differential`.
@@ -868,6 +900,8 @@ int main() {
     test_compressed_pubkey();
     std::cout << "\n";
     test_input_validation_and_grouping();
+    std::cout << "\n";
+    test_telemetry_timing();
     std::cout << "\n";
     test_ec_point_arithmetic();
 

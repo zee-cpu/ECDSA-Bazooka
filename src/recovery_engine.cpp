@@ -388,7 +388,6 @@ RecoveryResult RecoveryEngine::run(
     tel_.reset();
     tel_.time_budget_sec = max_time_sec; // 0 = unlimited
     tel_.sampling_seed = sampling_seed;  // set after reset so it reaches the profiler
-    tel_.start_time = start;
     tel_.signatures_loaded = signatures.size();
     tel_.signatures_valid = pairs.size();
 

@@ -171,8 +171,7 @@ void TelemetryRenderer::render_dashboard() {
     int W = term_width_;
     int inner = W - 2; // between the border verticals
 
-    auto now = steady_clock::now();
-    double elapsed = duration<double>(now - tel_.start_time).count();
+    double elapsed = tel_.elapsed_seconds();
 
     size_t loaded = tel_.signatures_loaded.load();
     size_t valid = tel_.signatures_valid.load();
@@ -342,8 +341,7 @@ void TelemetryRenderer::render_plain() {
     // per refresh rather than accumulating escape-code noise.
     using namespace std::chrono;
 
-    auto now = steady_clock::now();
-    double elapsed = duration<double>(now - tel_.start_time).count();
+    double elapsed = tel_.elapsed_seconds();
 
     size_t loaded = tel_.signatures_loaded.load();
     size_t valid = tel_.signatures_valid.load();
