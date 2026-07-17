@@ -21,7 +21,14 @@ public:
         // skipping statistical detection. Both 0 (the default) leaves behaviour
         // identical to before.
         const mpz& modulo_omega = mpz(0),
-        const mpz& modulo_bound = mpz(0)
+        const mpz& modulo_bound = mpz(0),
+        // Phase 6d: optional linearly-related (LCG) nonce hint, k_{i+1} = a*k_i+b
+        // (mod n). When lcg_a > 0 the multiplier (and increment lcg_b, default 0)
+        // are supplied and two consecutive signatures suffice. lcg_a == 0 (the
+        // default) leaves the unknown-(a,b) closed-form pre-scan to discover the
+        // key on its own, or -- absent any LCG structure -- to find nothing.
+        const mpz& lcg_a = mpz(0),
+        const mpz& lcg_b = mpz(0)
     );
 
 private:
@@ -46,6 +53,21 @@ private:
     // wrong candidate never produces a wrong key.
     std::optional<mpz> try_modulo(const std::vector<Pair>& pairs, const mpz& modulo_omega,
                                   const mpz& modulo_bound, size_t max_sigs, const mpz& pubkey_hint);
+
+    // Phase 6d: closed-form recovery from linearly-related (LCG) nonces,
+    // k_{i+1} = a*k_i + b (mod n). With a supplied multiplier (lcg_a > 0, plus
+    // increment lcg_b) two consecutive signatures give d directly. With a,b
+    // unknown, five consecutive signatures give a 4x4 modular linear system in
+    // (d, a*d, a, b) that still yields d. Signatures are taken in file order,
+    // then (as a fallback) sorted by timestamp -- the LCG advances in generation
+    // order, which the timestamp usually reflects. Pubkey-gated, so a spurious
+    // solve on non-LCG data never yields a wrong key. `forced` widens the search
+    // from the cheap bounded pre-scan to every window. std::nullopt if none
+    // recover.
+    std::optional<mpz> try_linear_nonce(const std::vector<Signature>& signatures,
+                                        const std::vector<Pair>& pairs,
+                                        const mpz& pubkey_hint,
+                                        const mpz& lcg_a, const mpz& lcg_b, bool forced);
 
     bool dispatch_and_recover(
         const BiasProfile& profile,

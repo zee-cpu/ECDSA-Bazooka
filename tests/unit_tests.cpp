@@ -17,6 +17,7 @@
 #include <cmath>
 #include <random>
 #include <vector>
+#include <algorithm>
 
 namespace {
 
@@ -484,6 +485,102 @@ void test_modulo_ehnp() {
 }
 
 // ---------------------------------------------------------------------
+// Linearly-related (LCG) nonce recovery (Phase 6d). k_{i+1} = a*k_i + b (mod n)
+// yields the key by closed-form modular algebra over consecutive signatures --
+// no lattice. Covers: unknown (a,b) via a 4x4 solve (auto), a supplied-(a,b)
+// hint via a single consecutive pair, the timestamp-ordered fallback (which is
+// what finally uses the Timestamp field), and the no-false-positive gate.
+// ---------------------------------------------------------------------
+void test_linear_nonce() {
+    std::cout << "-- linearly-related (LCG) nonce recovery (Phase 6d) --\n";
+    const mpz d("0x2f3e4d5c6b7a8998a7b6c5d4e3f201123456789abcdef0fedcba98765432100f");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz& n = SECP256K1_N;
+    const mpz a("0x9e3779b97f4a7c15abcdef0123456789abcdef0123456789abcdef0123456789");
+    const mpz b("0x1234567890fedcba1234567890fedcba1234567890fedcba1234567890fedcba");
+
+    auto lcg_seq = [&](const mpz& k0, int count) {
+        std::vector<mpz> ks; mpz k = k0 % n;
+        for (int i = 0; i < count; ++i) { ks.push_back(k); k = (a * k + b) % n; }
+        return ks;
+    };
+
+    // (1) Unknown a,b: the AUTO closed-form 4x4 pre-scan recovers from file order.
+    {
+        auto ks = lcg_seq(mpz("0xdeadbeefcafef00d1122334455667788990011223344556677889900aabbccdd"), 8);
+        std::vector<Signature> sigs;
+        for (size_t i = 0; i < ks.size(); ++i) {
+            Signature s = make_sig(d, mpz(5000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
+            s.timestamp = static_cast<int64_t>(i + 1);
+            sigs.push_back(s);
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(sigs, pairs);
+        check(res.success && res.method_used == RecoveryMethod::LINEAR && res.private_key == d,
+              "unknown-a,b LCG set recovers the exact key via closed-form 4x4 (method LINEAR)");
+    }
+
+    // (2) Known a,b hint: two consecutive signatures suffice.
+    {
+        auto ks = lcg_seq(mpz("0x0badf00d0badf00d0badf00d0badf00d0badf00d0badf00d0badf00d0badf00d"), 3);
+        std::vector<Signature> sigs;
+        for (size_t i = 0; i < ks.size(); ++i) {
+            Signature s = make_sig(d, mpz(6000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
+            s.timestamp = static_cast<int64_t>(i + 1);
+            sigs.push_back(s);
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(sigs, pairs, RecoveryMethod::AUTO, 0, 0.0,
+                                        DEFAULT_SAMPLING_SEED, mpz(0), mpz(0), a, b);
+        check(res.success && res.method_used == RecoveryMethod::LINEAR && res.private_key == d,
+              "known-a,b LCG hint recovers the exact key from two consecutive sigs");
+    }
+
+    // (3) Timestamp-order fallback: the file order is SHUFFLED, but each
+    // signature's timestamp reflects true generation order -- recovery reorders
+    // by timestamp and succeeds. This is the Timestamp field's one real use.
+    {
+        auto ks = lcg_seq(mpz("0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"), 9);
+        std::vector<Signature> sigs;
+        for (size_t i = 0; i < ks.size(); ++i) {
+            Signature s = make_sig(d, mpz(7000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
+            s.timestamp = static_cast<int64_t>(i * 60 + 100);  // monotone in true order
+            sigs.push_back(s);
+        }
+        std::mt19937_64 rr(0x5151);
+        std::shuffle(sigs.begin(), sigs.end(), rr);   // scramble file order
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(sigs, pairs);
+        check(res.success && res.method_used == RecoveryMethod::LINEAR && res.private_key == d,
+              "shuffled LCG set recovers via the timestamp-ordered retry");
+    }
+
+    // (4) No false positive: random (non-LCG) nonces yield NO linear structure.
+    // Force -m linear so the assertion targets exactly the LCG pre-scan (which
+    // fails and reports honestly) rather than paying for the fallback lattice's
+    // exhaustive candidate search on unrecoverable data.
+    {
+        std::mt19937_64 rng(0xA5A5A5A5ULL);
+        auto rand255 = [&]() { mpz v = 0; for (int i = 0; i < 8; ++i) { v <<= 32; v += static_cast<unsigned long>(rng() & 0xffffffffULL); } return v % n; };
+        std::vector<Signature> sigs;
+        for (size_t i = 0; i < 8; ++i) {
+            mpz k = rand255(); if (k == 0) k = 1;
+            Signature s = make_sig(d, mpz(8000 + static_cast<long>(i)), k, pubkey, i + 1);
+            s.timestamp = static_cast<int64_t>(i + 1);
+            sigs.push_back(s);
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(sigs, pairs, RecoveryMethod::LINEAR);
+        check(!res.success,
+              "random (non-LCG) nonces yield no LINEAR recovery (no false positive)");
+    }
+}
+
+// ---------------------------------------------------------------------
 // Compressed SEC1 pubkey support. pubkey_to_point used to accept only the
 // uncompressed (0x04) form; a 33-byte compressed key (0x02/0x03 || x, y
 // recovered from the curve) was padded to 130 chars and rejected. Pin the
@@ -696,6 +793,8 @@ int main() {
     test_known_lsb();
     std::cout << "\n";
     test_modulo_ehnp();
+    std::cout << "\n";
+    test_linear_nonce();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

@@ -99,7 +99,12 @@ enum class RecoveryMethod {
     // (k mod omega in [0, bound)). Uses the two-block lattice, not the
     // single-block Boneh-Venkatesan basis. Appended for the same wire-stability
     // reason as REPEATED_NONCE above.
-    MODULO
+    MODULO,
+    // Phase 6d: closed-form recovery from linearly-related (LCG) nonces
+    // (k_{i+1} = a*k_i + b mod n). Like the repeated-nonce case it is algebra,
+    // not a lattice -- a small modular linear system over consecutive
+    // signatures. Appended for wire stability.
+    LINEAR
 };
 
 // Telemetry state for live dashboard (thread-safe)

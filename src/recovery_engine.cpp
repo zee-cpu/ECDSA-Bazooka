@@ -3,6 +3,7 @@
 #include "verifier.h"
 #include "bias_profiler.h"
 #include "utils.h"
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <map>
@@ -10,6 +11,42 @@
 #include <vector>
 
 namespace {
+
+    // Solve a small NxN linear system M*v = rhs over Z/n (n prime, so a field)
+    // by Gauss-Jordan elimination. Returns v, or nullopt if the matrix is
+    // singular mod n. Used by the Phase 6d LCG recovery, where the consecutive-
+    // nonce constraints become linear once the product a*d is its own unknown.
+    std::optional<std::vector<mpz>> solve_modn(std::vector<std::vector<mpz>> M,
+                                               std::vector<mpz> rhs, const mpz& n) {
+        size_t N = M.size();
+        for (size_t i = 0; i < N; ++i) M[i].push_back(rhs[i]);  // augmented column
+        for (size_t col = 0; col < N; ++col) {
+            size_t piv = N;
+            for (size_t r = col; r < N; ++r) {
+                mpz v = M[r][col] % n; if (v < 0) v += n;
+                if (v != 0) { piv = r; break; }
+            }
+            if (piv == N) return std::nullopt;  // singular
+            std::swap(M[col], M[piv]);
+            mpz ic = utils::mod_inverse(M[col][col], n);
+            if (ic == 0) return std::nullopt;
+            for (size_t k = col; k <= N; ++k) M[col][k] = utils::mod_mul(M[col][k], ic, n);
+            for (size_t r = 0; r < N; ++r) {
+                if (r == col) continue;
+                mpz f = M[r][col] % n; if (f < 0) f += n;
+                if (f == 0) continue;
+                for (size_t k = col; k <= N; ++k) {
+                    mpz t = (M[r][k] - utils::mod_mul(f, M[col][k], n)) % n;
+                    if (t < 0) t += n;
+                    M[r][k] = t;
+                }
+            }
+        }
+        std::vector<mpz> sol(N);
+        for (size_t i = 0; i < N; ++i) { mpz v = M[i][N] % n; if (v < 0) v += n; sol[i] = v; }
+        return sol;
+    }
+
     // Phase 6b: the shared known-low-bit width if EVERY valid signature carries
     // the same one, else 0. Requiring all valid sigs to be annotated (no zeros
     // mixed in) is deliberate -- an un-annotated pair would be misread as "low
@@ -172,6 +209,107 @@ std::optional<mpz> RecoveryEngine::try_modulo(
     return std::nullopt;
 }
 
+std::optional<mpz> RecoveryEngine::try_linear_nonce(
+    const std::vector<Signature>& signatures, const std::vector<Pair>& /*pairs*/,
+    const mpz& pubkey_hint, const mpz& lcg_a, const mpz& lcg_b, bool forced) {
+    const mpz& n = SECP256K1_N;
+    tel_.set_phase("Scanning for linearly-related (LCG) nonces");
+
+    // Recompute the HNP coordinates (w = z*s^-1, x = r*s^-1) in file order,
+    // carrying each signature's timestamp so the ordering fallback below can
+    // reorder by it. (We can't reuse the Pair vector alone -- it doesn't carry
+    // the timestamp, which is exactly the field 6d finally puts to use.)
+    struct WX { mpz w, x; int64_t ts; };
+    std::vector<WX> seq;
+    for (const auto& s : signatures) {
+        if (!s.valid) continue;
+        mpz sinv = utils::mod_inverse(s.s, n);
+        if (sinv == 0) continue;
+        seq.push_back({ utils::mod_mul(s.z, sinv, n), utils::mod_mul(s.r, sinv, n), s.timestamp });
+    }
+    if (seq.size() < (lcg_a > 0 ? static_cast<size_t>(2) : static_cast<size_t>(6)))
+        return std::nullopt;
+
+    auto accept = [&](const mpz& d) -> bool {
+        if (d <= 1 || d >= n - 1) return false;
+        // With a pubkey this is definitive. Without one (opt-in best-effort),
+        // there is nothing to prove it against here, so defer to run()'s own
+        // Verifier -- but the caller (unknown-a,b path) only reaches here after
+        // an independent second window agreed, which a wrong solve won't do.
+        if (pubkey_hint > 1) return utils::verify_pubkey(d, pubkey_hint);
+        return true;
+    };
+
+    auto pass = [&](const std::vector<WX>& q) -> std::optional<mpz> {
+        if (q.size() < 6 && lcg_a <= 0) return std::nullopt;
+        if (lcg_a > 0) {
+            // Known multiplier a (and increment b): a single consecutive pair
+            //   k_{i+1} = a*k_i + b  and  k = w + x*d  give
+            //   d = (a*w_i + b - w_{i+1}) * (x_{i+1} - a*x_i)^-1  (mod n).
+            size_t lim = forced ? q.size() - 1 : std::min<size_t>(q.size() - 1, 64);
+            for (size_t i = 0; i < lim; ++i) {
+                mpz denom = (q[i+1].x - utils::mod_mul(lcg_a, q[i].x, n)) % n;
+                if (denom < 0) denom += n;
+                if (denom == 0) continue;
+                mpz num = (utils::mod_mul(lcg_a, q[i].w, n) + lcg_b - q[i+1].w) % n;
+                if (num < 0) num += n;
+                mpz d = utils::mod_mul(num, utils::mod_inverse(denom, n), n);
+                if (accept(d)) return d;
+            }
+            return std::nullopt;
+        }
+        // Unknown a,b: five consecutive signatures give four linear constraints
+        //   x_{i+1} d - x_i e - w_i a - b = -w_{i+1},   e := a*d
+        // in the four unknowns (d, e, a, b). Solve each 4x4 for d.
+        //
+        // A single solve on non-LCG data is meaningless noise, so trust d only
+        // when two ADJACENT (overlapping) windows land on the SAME value --
+        // genuine LCG makes every window agree; random data effectively never
+        // does. This is also what keeps the pre-scan cheap enough to run on every
+        // recovery: on non-LCG input it is solve-only modular arithmetic (no
+        // scalar multiplications), and the one pubkey check happens only on the
+        // rare adjacent agreement. (Needs >=6 consecutive sigs for two windows.)
+        std::optional<mpz> prev;
+        size_t lim = forced ? q.size() - 4 : std::min<size_t>(q.size() - 4, 48);
+        for (size_t i = 0; i < lim; ++i) {
+            std::vector<std::vector<mpz>> M(4, std::vector<mpz>(4));
+            std::vector<mpz> rhs(4);
+            for (size_t j = 0; j < 4; ++j) {
+                mpz nx = (n - q[i+j].x % n) % n;
+                mpz nw = (n - q[i+j].w % n) % n;
+                M[j][0] = q[i+j+1].x % n;   // d
+                M[j][1] = nx;               // e = a*d
+                M[j][2] = nw;               // a
+                M[j][3] = n - 1;            // b   (coefficient -1)
+                rhs[j]  = (n - q[i+j+1].w % n) % n;
+            }
+            auto sol = solve_modn(M, rhs, n);
+            if (!sol) { prev.reset(); continue; }
+            mpz d = (*sol)[0];
+            if (d <= 1 || d >= n - 1) { prev.reset(); continue; }
+            if (prev && *prev == d && accept(d)) return d;
+            prev = d;
+        }
+        return std::nullopt;
+    };
+
+    if (auto d = pass(seq)) return d;
+
+    // Ordering fallback: the LCG advances in nonce-generation order, which the
+    // file order may not preserve but the timestamp usually does. Retry on the
+    // timestamp-sorted sequence -- but only if timestamps are actually present
+    // and not all identical (else it is the same order we just tried).
+    bool have_ts = false;
+    for (size_t i = 1; i < seq.size(); ++i) if (seq[i].ts != seq[0].ts) { have_ts = true; break; }
+    if (have_ts) {
+        std::vector<WX> byts = seq;
+        std::stable_sort(byts.begin(), byts.end(),
+                         [](const WX& x, const WX& y) { return x.ts < y.ts; });
+        if (auto d = pass(byts)) return d;
+    }
+    return std::nullopt;
+}
+
 bool RecoveryEngine::dispatch_and_recover(
     const BiasProfile& profile,
     const std::vector<Pair>& pairs,
@@ -235,7 +373,9 @@ RecoveryResult RecoveryEngine::run(
     double max_time_sec,
     uint64_t sampling_seed,
     const mpz& modulo_omega,
-    const mpz& modulo_bound
+    const mpz& modulo_bound,
+    const mpz& lcg_a,
+    const mpz& lcg_b
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -269,6 +409,30 @@ RecoveryResult RecoveryEngine::run(
         result.signatures_used = signatures.size();
         result.bias_profile.description =
             "Reused nonce (r-collision) -- recovered by closed-form algebra, no lattice";
+    } else if (auto ln = try_linear_nonce(signatures, pairs, pubkey_hint, lcg_a, lcg_b,
+                                          force_method == RecoveryMethod::LINEAR)) {
+        // Phase 6d pre-scan: linearly-related (LCG) nonces yield the key by
+        // closed-form algebra (a small modular linear system over consecutive
+        // signatures), no lattice -- like the repeated-nonce case. Cheap and
+        // pubkey-gated, so it runs on every AUTO recovery and a spurious solve
+        // on non-LCG data is discarded rather than returned.
+        result.private_key = *ln;
+        result.private_key_hex = utils::mpz_to_hex(*ln);
+        result.method_used = RecoveryMethod::LINEAR;
+        result.signatures_used = signatures.size();
+        tel_.active_method = static_cast<int>(RecoveryMethod::LINEAR);
+        tel_.method_chosen = true;
+        result.bias_profile.description =
+            (lcg_a > 0
+                 ? "Linearly-related nonces (LCG, known multiplier) -- closed-form, no lattice"
+                 : "Linearly-related nonces (LCG) -- closed-form 4x4 solve, no lattice");
+    } else if (force_method == RecoveryMethod::LINEAR) {
+        // Forced LINEAR but no such structure found: fail honestly rather than
+        // silently falling through to statistical profiling.
+        result.success = false;
+        result.verification_details = "No linearly-related (LCG) nonce structure found";
+        tel_.recovery_complete = true;
+        return result;
     } else if (force_method == RecoveryMethod::MODULO ||
                (modulo_omega > 0 && modulo_bound > 0)) {
         // Phase 6c: modulo / Extended-HNP. Either the (omega,bound) is supplied

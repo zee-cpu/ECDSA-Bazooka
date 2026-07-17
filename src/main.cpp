@@ -15,7 +15,7 @@ static void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options] <input.txt>\n\n";
     std::cout << "Options:\n";
     std::cout << "  -i, --input FILE       Input signature file (required)\n";
-    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fallback | modulo (default: auto)\n";
+    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fallback | modulo | linear (default: auto)\n";
     std::cout << "  -s, --max-sigs N       Maximum signatures to use\n";
     std::cout << "  -t, --max-time SEC     Max time budget (seconds)\n";
     std::cout << "  -v, --verbose          Enable live telemetry dashboard\n";
@@ -25,6 +25,8 @@ static void print_usage(const char* prog) {
     std::cout << "      --seed N           Sampling RNG seed (default fixed; for reproducibility)\n";
     std::cout << "      --modulo-omega N   Modulo/EHNP hint: period omega (k mod omega in [0,bound))\n";
     std::cout << "      --modulo-bound N   Modulo/EHNP hint: residue bound (use with --modulo-omega)\n";
+    std::cout << "      --lcg-a N          Linear-nonce hint: LCG multiplier a (k_{i+1}=a*k_i+b mod n)\n";
+    std::cout << "      --lcg-b N          Linear-nonce hint: LCG increment b (default 0; use with --lcg-a)\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -35,6 +37,7 @@ RecoveryMethod parse_method(const std::string& s) {
     if (s == "lattice") return RecoveryMethod::LATTICE;
     if (s == "fallback") return RecoveryMethod::FALLBACK;
     if (s == "modulo") return RecoveryMethod::MODULO;
+    if (s == "linear") return RecoveryMethod::LINEAR;
     return RecoveryMethod::AUTO;
 }
 
@@ -49,9 +52,12 @@ int main(int argc, char** argv) {
     uint64_t sampling_seed = DEFAULT_SAMPLING_SEED;
     mpz modulo_omega = 0;   // Phase 6c hint
     mpz modulo_bound = 0;
+    mpz lcg_a = 0;          // Phase 6d hint
+    mpz lcg_b = 0;
 
     enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001,
-           OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003 };
+           OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003,
+           OPT_LCG_A = 1004, OPT_LCG_B = 1005 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -63,6 +69,8 @@ int main(int argc, char** argv) {
         {"seed", required_argument, 0, OPT_SEED},
         {"modulo-omega", required_argument, 0, OPT_MOD_OMEGA},
         {"modulo-bound", required_argument, 0, OPT_MOD_BOUND},
+        {"lcg-a", required_argument, 0, OPT_LCG_A},
+        {"lcg-b", required_argument, 0, OPT_LCG_B},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -105,6 +113,16 @@ int main(int argc, char** argv) {
             case OPT_MOD_BOUND:
                 if (modulo_bound.set_str(optarg, 0) != 0) {
                     std::cerr << "Error: invalid --modulo-bound value\n"; return 1;
+                }
+                break;
+            case OPT_LCG_A:
+                if (lcg_a.set_str(optarg, 0) != 0) {
+                    std::cerr << "Error: invalid --lcg-a value\n"; return 1;
+                }
+                break;
+            case OPT_LCG_B:
+                if (lcg_b.set_str(optarg, 0) != 0) {
+                    std::cerr << "Error: invalid --lcg-b value\n"; return 1;
                 }
                 break;
             case 'h':
@@ -191,7 +209,9 @@ int main(int argc, char** argv) {
         max_time,
         sampling_seed,
         modulo_omega,
-        modulo_bound
+        modulo_bound,
+        lcg_a,
+        lcg_b
     );
 
     // Stop renderer
@@ -231,6 +251,7 @@ int main(int argc, char** argv) {
                 case RecoveryMethod::FALLBACK: return "FALLBACK";
                 case RecoveryMethod::REPEATED_NONCE: return "REPEATED_NONCE";
                 case RecoveryMethod::MODULO: return "MODULO (Extended-HNP)";
+                case RecoveryMethod::LINEAR: return "LINEAR (LCG nonces)";
                 default: return "UNKNOWN";
             }
         };

@@ -83,6 +83,23 @@ if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; 
 check "MODULO 12-bit window: recovered key matches ground truth" "$match"
 
 echo
+echo "=== E2E: linearly-related (LCG) nonces ==="
+# k_{i+1} = a*k_i + b (mod n). Recovered by closed-form algebra -- a small modular
+# linear solve over consecutive signatures -- with a,b UNKNOWN, no lattice and no
+# hint. Fast (well under a second); the outer timeout is just a safety net.
+f="$WORKDIR/linear.txt"
+gen_out=$(python3 "$GEN" --count 40 --bias linear --output "$f" --seed 44 2>&1)
+gt=$(echo "$gen_out" | grep -oE '0x[0-9a-fA-F]+' | head -1)
+run_out=$(timeout 60 "$BINARY" -i "$f" -q -t 40 2>&1)
+recovered=$(echo "$run_out" | grep -oE '^\s*d = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
+echo "$run_out" | grep -q '\[SUCCESS\]'
+check "LINEAR (LCG) unknown a,b (40 sigs): reports SUCCESS" "$?"
+if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; fi
+check "LINEAR (LCG): recovered key matches ground truth" "$match"
+echo "$run_out" | grep -q 'Method: LINEAR'
+check "LINEAR (LCG): reported method is LINEAR (closed-form, not lattice)" "$?"
+
+echo
 echo "=== E2E: unbiased data must NOT produce a false recovery ==="
 f="$WORKDIR/none.txt"
 python3 "$GEN" --count 800 --bias none --bias-bits 0 --output "$f" --seed 21 > /dev/null 2>&1

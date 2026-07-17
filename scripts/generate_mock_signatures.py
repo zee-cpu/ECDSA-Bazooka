@@ -15,6 +15,7 @@ Bias modes:
   msb     : top N bits biased toward 0 (k < 2^(256 - bias_bits))
   lsb     : bottom N bits fixed to 0 (k % 2**bias_bits == 0)
   modulo  : k mod Omega in [0, bound)   (Omega=2^a, bound=2^(a-bias_bits); windowed zeros)
+  linear  : k_{i+1} = a*k_i + b (mod n) (LCG-related nonces, in generation order)
   none    : full uniform random k
 
 Prints ground-truth d at end for verification.
@@ -165,7 +166,7 @@ Timestamp: {ts}
 def main():
     parser = argparse.ArgumentParser(description="Generate biased ECDSA signature mock data.")
     parser.add_argument("--count", type=int, default=2000, help="Number of signatures")
-    parser.add_argument("--bias", choices=["msb", "lsb", "modulo", "none"], default="msb",
+    parser.add_argument("--bias", choices=["msb", "lsb", "modulo", "linear", "none"], default="msb",
                         help="Bias type")
     parser.add_argument("--bias-bits", type=int, default=16,
                         help="Bias magnitude in bits (leaked bits estimate)")
@@ -175,6 +176,10 @@ def main():
                         help="Optional hex private key (without 0x). If omitted, random.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--omega", type=int, default=None, help="For modulo mode: period")
+    parser.add_argument("--lcg-a", type=int, default=None,
+                        help="For linear mode: LCG multiplier a (k_{i+1}=a*k_i+b mod n). Random if omitted.")
+    parser.add_argument("--lcg-b", type=int, default=None,
+                        help="For linear mode: LCG increment b. Random if omitted.")
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -203,6 +208,16 @@ def main():
               f"(2^{_a - args.bias_bits})  leaked-window={args.bias_bits} bits")
         print(f"[+] Recover with: --modulo-omega {_omega} --modulo-bound {_bound}")
 
+    lcg_a = lcg_b = lcg_state = None
+    if args.bias == "linear":
+        # LCG-related nonces: k_{i+1} = a*k_i + b (mod n), emitted in generation
+        # order with sequential timestamps so recovery can also reorder by time.
+        lcg_a = args.lcg_a if args.lcg_a is not None else random.randint(2, N - 1)
+        lcg_b = args.lcg_b if args.lcg_b is not None else random.randint(1, N - 1)
+        lcg_state = random.randint(1, N - 1)   # k_0
+        print(f"[+] LINEAR (LCG) params: a={lcg_a}  b={lcg_b}")
+        print(f"[+] Recover with: --lcg-a {lcg_a} --lcg-b {lcg_b}   (or '-m linear' to solve a,b too)")
+
     # Derive pubkey once for logging
     pub_point = d * G
     pub_x = hex(pub_point.x())[2:].zfill(64)
@@ -212,14 +227,20 @@ def main():
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     signatures = []
+    base_ts = int(time.time()) - args.count * 60
     for i in range(1, args.count + 1):
         z = generate_random_z()
-        k = compute_k_biased(args.bias, args.bias_bits, args.omega)
+        if args.bias == "linear":
+            k = lcg_state % N or 1
+            lcg_state = (lcg_a * lcg_state + lcg_b) % N   # advance the LCG
+            ts = base_ts + i * 60   # sequential: timestamp order == generation order
+        else:
+            k = compute_k_biased(args.bias, args.bias_bits, args.omega)
+            ts = int(time.time()) - random.randint(0, 86400 * 365)
         r, s, z, pubkey_int = sign_with_biased_k(d, z, k)
 
         # metadata
         txid = hashlib.sha256(f"tx-{i}-{int(time.time())}".encode()).hexdigest()
-        ts = int(time.time()) - random.randint(0, 86400 * 365)
 
         block = format_signature_block(i, r, s, z, pubkey_int, txid, ts)
         signatures.append(block)

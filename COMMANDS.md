@@ -146,6 +146,17 @@ python3 scripts/generate_mock_signatures.py \
 # ... then recover with the printed hint:
 #   ./ecdsa_nonce_recovery -i data/modulo_12b.txt --modulo-omega 65536 --modulo-bound 16 -q
 
+# LINEAR / LCG-related nonces (Phase 6d) -- k_{i+1} = a*k_i + b (mod n), emitted
+# in generation order with sequential timestamps. Recovered by closed-form
+# algebra (no lattice): a supplied (a,b) needs two consecutive sigs; UNKNOWN
+# (a,b) needs five (a 4x4 modular solve). The generator prints a and b.
+python3 scripts/generate_mock_signatures.py \
+    --count 40 --bias linear --output data/linear.txt --seed 44
+# ... recover with a,b unknown (nothing to supply):
+#   ./ecdsa_nonce_recovery -i data/linear.txt -q
+# ... or, if a,b are known, supply them (two consecutive sigs suffice):
+#   ./ecdsa_nonce_recovery -i data/linear.txt --lcg-a <a> --lcg-b <b> -q
+
 # No bias (should fail to recover)
 python3 scripts/generate_mock_signatures.py \
     --count 1000 --bias none \
@@ -235,6 +246,25 @@ and recovery routes to the two-block EHNP lattice:
 Every candidate is verified against the PubKey, so a wrong `(ω, bound)` guess
 simply fails to recover — it never yields an incorrect key.
 
+### Linearly-related / LCG nonces (Phase 6d)
+
+If nonces come from a linear congruential generator (`k_{i+1} = a·k_i + b mod n`),
+consecutive signatures give the key by closed-form algebra — no lattice. This runs
+automatically on every `auto` recovery (a cheap, PubKey-gated pre-scan), so
+usually you need supply nothing:
+
+```bash
+# a, b UNKNOWN: five consecutive signatures -> a 4x4 modular solve -> d
+./ecdsa_nonce_recovery -i ../data/linear.txt -v
+
+# a, b known: two consecutive signatures suffice
+./ecdsa_nonce_recovery -i ../data/linear.txt --lcg-a <a> --lcg-b <b> -v
+```
+
+Signatures are taken in file order, then retried in timestamp order (the LCG
+advances in generation time), so out-of-order logs still recover. PubKey-gated:
+a spurious solve on non-LCG data is discarded, never returned.
+
 ### Limit resources
 
 ```bash
@@ -315,7 +345,7 @@ cd build && make -j$(nproc)
 | Flag                  | Meaning                              | Default   |
 |-----------------------|--------------------------------------|-----------|
 | `-i FILE` / `--input` | Signature file (required)            | —         |
-| `-m METHOD`           | `auto \| lattice \| fallback \| modulo` | `auto`    |
+| `-m METHOD`           | `auto \| lattice \| fallback \| modulo \| linear` | `auto`    |
 | `-s N`                | Max signatures to use                | all       |
 | `-t SEC`              | Max time budget                      | unlimited |
 | `-v`                  | Live telemetry dashboard             | on        |
@@ -324,6 +354,8 @@ cd build && make -j$(nproc)
 | `--seed N`            | Sampling RNG seed (hex or decimal), for reproducibility | fixed |
 | `--modulo-omega N`    | Modulo/EHNP hint: period ω (k mod ω in [0, bound)) | — |
 | `--modulo-bound N`    | Modulo/EHNP hint: residue bound (use with `--modulo-omega`) | — |
+| `--lcg-a N`           | Linear-nonce hint: LCG multiplier a (k_{i+1}=a·k_i+b mod n) | — |
+| `--lcg-b N`           | Linear-nonce hint: LCG increment b (default 0; use with `--lcg-a`) | — |
 | `-h`                  | Help                                 | —         |
 
 ## 11. Expected Behavior per Bias Level
@@ -336,6 +368,7 @@ cd build && make -j$(nproc)
 | MSB/LSB   | ≤ 3         | —          | —                | Out of reach in practice (see README feasibility notes) |
 | MODULO (window ≥ ~12) | window bits | 250–500 | MODULO (Extended-HNP) | k mod ω in [0,bound); needs `--modulo-omega/--modulo-bound` hint or `-m modulo`; LLL, ~15s |
 | MODULO (window ~8) | window bits | 500+ | MODULO (Extended-HNP) | Best-effort, heavy BKZ, minutes, not guaranteed (like MSB L=4) |
+| LINEAR (LCG) | n/a | 5 (unknown a,b) / 2 (known) | LINEAR (LCG nonces) | Closed-form, no lattice, sub-second; auto pre-scan, PubKey-gated |
 | none      | 0           | any        | Reports failure  | No false positives |
 
 ## 12. Troubleshooting
