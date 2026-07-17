@@ -2,20 +2,25 @@
 
 [![CI](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml/badge.svg)](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml)
 
-Given a set of real ECDSA signatures from the same private key where the nonce
-(`k`) has some kind of statistical bias (MSB, LSB, or weak/soft bias), detect
-the bias and recover the private key. Core approach: eliminate the private key
-`d` algebraically via a
-pivot-elimination trick across signature pairs, reducing to a Hidden Number
-Problem in one small unknown, solved via lattice reduction (LLL/BKZ) with a
-Kannan CVP-to-SVP embedding.
+Given a set of real ECDSA signatures from the same private key with an
+exploitable nonce (`k`) weakness, detect it and recover the private key.
+Different weaknesses call for different math: statistical bias in the nonce's
+high or low bits is a Hidden Number Problem solved by lattice reduction
+(LLL/BKZ), a windowed / modulo bias uses an Extended-HNP two-block lattice,
+and a reused nonce or an LCG-related nonce sequence hands over the key by
+closed-form algebra with no lattice at all. The lattice core eliminates the
+private key `d` via a pivot-elimination trick across signature pairs, reducing
+to an HNP in one small unknown, solved with a Kannan CVP-to-SVP embedding.
+
+Every recovered key is verified against the public key, so a wrong guess or a
+non-exploitable input is reported as failure — never as a wrong key.
 
 ## Quick start
 
 ```bash
 mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
 cd ..
-./build/unit_tests                       # <1s, run after every change
+./build/unit_tests                       # a few seconds, run after every change
 
 python3 scripts/generate_mock_signatures.py --count 500 --bias msb --bias-bits 12 \
   --output /tmp/test.txt --seed 1        # prints the ground-truth key to stdout
@@ -28,8 +33,22 @@ list.
 
 ## Current capability
 
-Recovery is by leak depth L (the number of biased high or low bits), for
-both MSB and LSB bias:
+The tool covers the known *exploitable* nonce-weakness classes below, auto-routing
+to the right method and reporting "no exploitable bias" otherwise.
+
+| Weakness | Nonce model | Method | Notes |
+|----------|-------------|--------|-------|
+| MSB bias | `k < 2^(256-L)` | Lattice (LLL/BKZ) | By leak depth L — see below |
+| LSB bias (zero) | `k ≡ 0 (mod 2^b)` | Lattice (LSB transform) | Same L-depth frontier as MSB |
+| Known-offset LSB | `k ≡ c (mod 2^b)`, `c` known | Lattice | Side-channel leak; optional per-signature `KnownLow:` field |
+| Modulo / Extended-HNP | `k mod ω ∈ [0, bound)` | Two-block EHNP lattice | Windowed zeros mid-nonce — see below |
+| Repeated nonce | two signatures share `k` | Closed-form algebra | From 2 signatures; the classic RNG-reset break |
+| Linear / LCG | `k_{i+1} = a·k_i + b (mod n)` | Closed-form algebra | Auto-recovers even with `a,b` unknown (5 sigs) |
+| Distributional skew | low-entropy but per-nonce value unknown | — | Correctly *rejected*: detectable ≠ exploitable |
+
+### Lattice recovery by leak depth (MSB / LSB)
+
+Recovery is by leak depth L (the number of biased high or low bits):
 
 - **L >= 5 bits: robustly recovered and validated.** Strong bias (L >= 7)
   resolves under plain LLL in seconds; L = 5-6 use a focused BKZ pass (tens
@@ -44,11 +63,28 @@ both MSB and LSB bias:
   genuine Fourier / Bleichenbacher attack there needs millions of same-key
   signatures -- see De Mulder et al. CHES 2013, Osaki & Kunihiro SAC 2024,
   Aranha et al. CCS 2020 -- which a wallet's on-chain history cannot supply).
-- **Modulo/Extended-HNP bias**: not implemented (`detect_modulo_bias` is a
-  stub).
 
 Give weak-bias cases a generous `--max-time` (e.g. `-t 400`): the L = 4-6 BKZ
 pass is budget-gated and is skipped if it cannot fit the remaining time.
+
+### Modulo / Extended-HNP (windowed zeros)
+
+Nonces with a zero window in the *middle* -- `k mod ω ∈ [0, bound)`, neither MSB
+(`k` is full-width) nor LSB (the low bits are free) -- are recovered by a
+two-block Extended-HNP lattice. Difficulty tracks the window width just like an
+MSB leak: a window of >= ~12 bits resolves under LLL in ~15s, while a narrow
+~8-bit window needs heavy BKZ and is best-effort (like MSB L=4). Supply the
+`(ω, bound)` hint the generator prints (`--modulo-omega/--modulo-bound`), or use
+`-m modulo` to sweep common windows.
+
+### Repeated-nonce and LCG (closed-form, no lattice)
+
+A reused nonce (two signatures sharing `r`) or an LCG-related nonce sequence
+(`k_{i+1} = a·k_i + b mod n`) hands over the key by modular algebra -- no lattice.
+Both run as cheap, pubkey-gated pre-scans on every recovery, so `-i file` alone
+catches them. The LCG solver recovers even when `a` and `b` are **unknown** (from
+five consecutive signatures, via a 4x4 modular solve) and retries in timestamp
+order so out-of-order logs still recover.
 
 ## Concurrency
 
@@ -67,7 +103,7 @@ an optimization, not a hard dependency.
 ## Testing
 
 ```bash
-./build/unit_tests                  # fast (<1s): math, transforms, validation, ECC edge cases
+./build/unit_tests                  # fast (a few seconds): math, transforms, validation, recovery paths, ECC edge cases
 ctest -R ecc_differential            # local ECC vs the trusted `ecdsa` library (edge + random)
 ctest -R e2e_recovery                # slow (~5min): real recovery against real ground truth
 ```
@@ -79,13 +115,16 @@ end-to-end recovery smoke test. Sanitizer builds are available locally via
 
 ## Where things live
 
-- `src/lattice_solver.cpp` -- the core recovery engine (pivot-elimination +
-  Kannan embedding). Read the comment above `build_boneh_venkatesan_basis`
-  before touching it.
+- `src/lattice_solver.cpp` -- the core lattice recovery: the single-block
+  pivot-elimination + Kannan embedding (`build_boneh_venkatesan_basis` --
+  read its comment before touching it), and the two-block Extended-HNP lattice
+  for modulo/windowed bias (`recover_modulo`).
 - `src/bias_profiler.cpp` -- bias detection; `shrink_test_sweep` is the
   shared core used by both MSB and LSB detection.
-- `src/recovery_engine.cpp` -- dispatch (LATTICE vs FALLBACK),
-  candidate verification, retry logic.
+- `src/recovery_engine.cpp` -- dispatch and routing: the closed-form
+  pre-scans (`try_repeated_nonce`, `try_linear_nonce`), modulo/EHNP routing
+  (`try_modulo`), the lattice paths (LATTICE vs FALLBACK), candidate
+  verification, and retry logic.
 - `src/verifier.cpp` -- genuine independent ECDSA verification.
 - `src/secp256k1.cpp` -- EC primitives.
 - `tests/unit_tests.cpp` / `tests/e2e_recovery_test.sh` -- the two test
