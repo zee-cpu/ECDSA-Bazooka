@@ -356,6 +356,31 @@ void test_repeated_nonce() {
           "recovery method is reported as REPEATED_NONCE");
     check(res.private_key == d,
           "recovered key equals the true private key (duplicate record skipped, real reuse found)");
+
+    // A keyless first record must not hide a PubKey supplied by later records.
+    // Matching later metadata is accepted; a valid-but-different later PubKey
+    // must reject the otherwise equation-valid recovered key.
+    auto first_keyless = sigs;
+    first_keyless[0].pubkey = 0;
+    Telemetry good_tel;
+    auto good_pairs = PairComputer::compute_pairs(first_keyless, &good_tel);
+    RecoveryEngine good_engine(good_tel);
+    RecoveryResult good = good_engine.run(first_keyless, good_pairs);
+    check(good.success && good.private_key == d,
+          "later matching PubKey verifies when the first record is keyless");
+
+    auto mismatched = first_keyless;
+    mpz wrong_pubkey = utils::compute_pubkey(d + 1);
+    for (size_t i = 1; i < mismatched.size(); ++i) mismatched[i].pubkey = wrong_pubkey;
+    std::string mismatch_details;
+    check(!Verifier::verify_candidate(d, mismatched, mismatch_details),
+          "Verifier rejects a later supplied PubKey mismatch");
+    Telemetry bad_tel;
+    auto bad_pairs = PairComputer::compute_pairs(mismatched, &bad_tel);
+    RecoveryEngine bad_engine(bad_tel);
+    RecoveryResult bad = bad_engine.run(mismatched, bad_pairs);
+    check(!bad.success,
+          "a supplied PubKey mismatch rejects an equation-valid candidate");
 }
 
 // ---------------------------------------------------------------------

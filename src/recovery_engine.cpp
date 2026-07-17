@@ -393,7 +393,16 @@ RecoveryResult RecoveryEngine::run(
         return result;
     }
 
-    mpz pubkey_hint = signatures.empty() ? mpz(0) : signatures[0].pubkey;
+    // Use any supplied PubKey, not only the first record. Best-effort input may
+    // legitimately begin with keyless records while later records carry the
+    // shared key established by the input-integrity boundary.
+    mpz pubkey_hint = 0;
+    for (const auto& sig : signatures) {
+        if (sig.valid && sig.pubkey != 0) {
+            pubkey_hint = sig.pubkey;
+            break;
+        }
+    }
 
     // Phase 6a pre-scan: a reused nonce is the most common catastrophic ECDSA
     // RNG failure in the wild (Sony PS3, the 2013 Android SecureRandom Bitcoin
@@ -497,14 +506,6 @@ RecoveryResult RecoveryEngine::run(
 
     result.verification_details = details;
     result.success = verified;
-
-    // Hard PubKey gate
-    if (!signatures.empty() && signatures[0].pubkey != 0) {
-        if (details.find("PubKey match: NO") != std::string::npos) {
-            result.success = false;
-            result.verification_details = details + " [REJECTED: PubKey required]";
-        }
-    }
 
     tel_.recovery_complete = true;
     tel_.verification_passed = result.success;

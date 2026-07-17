@@ -74,17 +74,25 @@ bool Verifier::verify_candidate(
     // implies? This flags inconsistent/corrupted input data, but is not
     // itself the gate -- the standard ECDSA equation above already proves
     // correctness independent of what this field claims. ===
-    bool pubkey_field_present = !signatures.empty() && signatures[0].pubkey != 0;
-    bool pubkey_field_matches = false;
+    bool pubkey_field_present = false;
+    bool pubkey_field_matches = true;
+    for (const auto& sig : signatures) {
+        if (!sig.valid || sig.pubkey == 0) continue;
+        pubkey_field_present = true;
+        pubkey_field_matches = utils::verify_pubkey(d, sig.pubkey);
+        break;
+    }
     if (pubkey_field_present) {
-        pubkey_field_matches = utils::verify_pubkey(d, signatures[0].pubkey);
         oss << " | file PubKey " << (pubkey_field_matches ? "consistent" : "MISMATCH");
     }
 
-    bool success = equation_verified;
+    bool success = equation_verified &&
+                   (!pubkey_field_present || pubkey_field_matches);
 
     if (success) {
         oss << "  -> VERIFIED (standard ECDSA equation, " << equation_matches << "/" << checked << " signatures)";
+    } else if (equation_verified && pubkey_field_present && !pubkey_field_matches) {
+        oss << "  -> VERIFICATION FAILED (candidate does not match supplied PubKey)";
     } else {
         oss << "  -> VERIFICATION FAILED (" << equation_matches << "/" << checked << " signatures satisfied ECDSA equation)";
     }
