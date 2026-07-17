@@ -84,6 +84,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     bool r_seen = false, s_seen = false, z_seen = false, pk_seen = false;
     bool r_ok = false, s_ok = false, z_ok = false, pk_ok = false;
     bool timestamp_seen = false, timestamp_ok = false;
+    bool known_low_seen = false, known_low_ok = false;
     std::istringstream iss(block_text);
     std::string line;
 
@@ -107,18 +108,27 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
             // Phase 6b: known leaked low bits of this signature's nonce, from a
             // side channel. Format: "KnownLow: <bits> <value_hex>", e.g.
             // "KnownLow: 8 0xab" meaning k ≡ 0xab (mod 2^8). Range-checked in
-            // validate_signature; a malformed field leaves the default (none).
+            // validate_signature; malformed or duplicate supplied metadata is
+            // rejected below instead of silently degrading to "no hint".
+            if (known_low_seen) {
+                known_low_ok = false;
+                continue;
+            }
+            known_low_seen = true;
             size_t c = l.find(':');
             if (c != std::string::npos) {
                 std::istringstream ks(trim(l.substr(c + 1)));
-                std::string bstr, vstr;
-                if (ks >> bstr >> vstr) {
+                std::string bstr, vstr, extra;
+                if ((ks >> bstr >> vstr) && !(ks >> extra)) {
                     mpz v;
                     try {
-                        int b = std::stoi(bstr);
-                        if (parse_hex_to_mpz(vstr, v, MAX_SCALAR_HEX)) {
+                        size_t consumed = 0;
+                        int b = std::stoi(bstr, &consumed);
+                        if (consumed == bstr.size() &&
+                            parse_hex_to_mpz(vstr, v, MAX_SCALAR_HEX)) {
                             sig.known_low_bits = b;
                             sig.known_low_value = v;
+                            known_low_ok = true;
                         }
                     } catch (...) {}
                 }
@@ -159,6 +169,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     if (!z_ok)   return reject("malformed Z (non-hex or over-length)");
     if (pk_seen && !pk_ok) return reject("malformed PubKey (non-hex or over-length)");
     if (timestamp_seen && !timestamp_ok) return reject("malformed Timestamp");
+    if (known_low_seen && !known_low_ok) return reject("malformed KnownLow");
 
     sig.valid = validate_signature(sig);
     return sig;

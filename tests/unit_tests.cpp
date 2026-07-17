@@ -406,6 +406,20 @@ void test_known_lsb() {
         check(s.size() == 1 && s[0].known_low_bits == 8 && s[0].known_low_value == mpz(0xab),
               "parser reads 'KnownLow: 8 0xab' as b=8, c=0xab");
 
+        const std::string base = "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\nPubKey: " +
+                                 pubkey.get_str(16) + "\n";
+        for (const auto& [line, desc] : std::vector<std::pair<std::string, std::string>>{
+                 {"KnownLow: 8\n", "missing KnownLow value"},
+                 {"KnownLow: nope 0xab\n", "nonnumeric KnownLow width"},
+                 {"KnownLow: 8 nope\n", "nonhex KnownLow value"},
+                 {"KnownLow: 8 0xab trailing\n", "trailing KnownLow garbage"},
+             }) {
+            auto malformed = SignatureParser::parse_block(base + line);
+            check(malformed.has_value() && !malformed->valid &&
+                      malformed->reject_reason == "malformed KnownLow",
+                  desc + " is rejected");
+        }
+
         const std::string bad = "/tmp/test_knownlow_bad.txt";
         { std::ofstream f(bad);
           f << "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\n"
