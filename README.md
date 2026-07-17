@@ -2,138 +2,109 @@
 
 [![CI](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml/badge.svg)](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml)
 
-Given a set of real ECDSA signatures from the same private key with an
-exploitable nonce (`k`) weakness, detect it and recover the private key.
-Different weaknesses call for different math: statistical bias in the nonce's
-high or low bits is a Hidden Number Problem solved by lattice reduction
-(LLL/BKZ), a windowed / modulo bias uses an Extended-HNP two-block lattice,
-and a reused nonce or an LCG-related nonce sequence hands over the key by
-closed-form algebra with no lattice at all. The lattice core eliminates the
-private key `d` via a pivot-elimination trick across signature pairs, reducing
-to an HNP in one small unknown, solved with a Kannan CVP-to-SVP embedding.
+This command-line tool analyzes ECDSA signatures produced by the same private
+key when their nonce values follow an exploitable structure. It selects a
+closed-form or lattice-based method based on the supplied data and options.
 
-Every recovered key is verified against the public key, so a wrong guess or a
-non-exploitable input is reported as failure — never as a wrong key.
+Every candidate is checked against the supplied public key. If the input does
+not provide enough usable structure, the program reports failure instead of
+returning an incorrect key.
+
+## What it handles
+
+| Pattern | Nonce model | Method |
+|---|---|---|
+| MSB bias | `k < 2^(256-L)` | LLL or BKZ lattice reduction |
+| LSB bias | `k ≡ 0 (mod 2^b)` | LSB transform and lattice reduction |
+| Known-offset LSB | `k ≡ c (mod 2^b)`, with `c` supplied | Exact-constraint lattice reduction |
+| Modulo window | `k mod ω ∈ [0, bound)` | Two-block Extended-HNP lattice |
+| Repeated nonce | Two signatures share the same `k` | Closed-form modular algebra |
+| Linear sequence | `k[i+1] = a·k[i] + b (mod n)` | Closed-form modular algebra |
+| Distributional skew | Low entropy without a per-value constraint | Detected when possible, but not recoverable by this tool |
+
+Repeated and linear patterns are checked automatically before the more
+expensive lattice paths. Use `--method` when you need to select a specific
+route.
 
 ## Quick start
 
+From the repository root:
+
 ```bash
-mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
-cd ..
-./build/unit_tests                       # a few seconds, run after every change
+cmake --preset release
+cmake --build --preset release -j"$(nproc)"
+./build/unit_tests
 
-python3 scripts/generate_mock_signatures.py --count 500 --bias msb --bias-bits 12 \
-  --output /tmp/test.txt --seed 1        # prints the ground-truth key to stdout
+python3 scripts/generate_mock_signatures.py \
+  --count 500 \
+  --bias msb \
+  --bias-bits 12 \
+  --output data/demo.txt \
+  --seed 1
 
-./build/ecdsa_nonce_recovery -i /tmp/test.txt -q
+./build/ecdsa_nonce_recovery -i data/demo.txt -q
 ```
 
-See `COMMANDS.md` for the full CLI/flag reference and prerequisite package
-list.
+See [COMMANDS.md](COMMANDS.md) for prerequisites, all build and test variants,
+fixture recipes, and the complete CLI reference.
 
-## Current capability
+## Practical limits
 
-The tool covers the known *exploitable* nonce-weakness classes below, auto-routing
-to the right method and reporting "no exploitable bias" otherwise.
+Difficulty increases sharply as the number of constrained bits decreases.
+These ranges describe the current 256-bit lattice path; results still depend
+on the input set and available time.
 
-| Weakness | Nonce model | Method | Notes |
-|----------|-------------|--------|-------|
-| MSB bias | `k < 2^(256-L)` | Lattice (LLL/BKZ) | By leak depth L — see below |
-| LSB bias (zero) | `k ≡ 0 (mod 2^b)` | Lattice (LSB transform) | Same L-depth frontier as MSB |
-| Known-offset LSB | `k ≡ c (mod 2^b)`, `c` known | Lattice | Side-channel leak; optional per-signature `KnownLow:` field |
-| Modulo / Extended-HNP | `k mod ω ∈ [0, bound)` | Two-block EHNP lattice | Windowed zeros mid-nonce — see below |
-| Repeated nonce | two signatures share `k` | Closed-form algebra | From 2 signatures; the classic RNG-reset break |
-| Linear / LCG | `k_{i+1} = a·k_i + b (mod n)` | Closed-form algebra | Auto-recovers even with `a,b` unknown (5 sigs) |
-| Distributional skew | low-entropy but per-nonce value unknown | — | Correctly *rejected*: detectable ≠ exploitable |
+| Constrained bits | Expected path | Practical expectation |
+|---|---|---|
+| 7 or more | LLL | Normally fast and reliable for suitable inputs |
+| 5–6 | Focused BKZ | Often needs a larger `--max-time` budget |
+| 4 | Heavier BKZ | Best-effort and not guaranteed for every input |
+| 3 or fewer | — | Outside practical scope for this implementation |
 
-### Lattice recovery by leak depth (MSB / LSB)
+Modulo-window inputs follow a similar curve: wider windows are easier, while
+narrow windows can require expensive BKZ passes. Supply `--modulo-omega` and
+`--modulo-bound` when those values are known.
 
-Recovery is by leak depth L (the number of biased high or low bits):
-
-- **L >= 5 bits: robustly recovered and validated.** Strong bias (L >= 7)
-  resolves under plain LLL in seconds; L = 5-6 use a focused BKZ pass (tens
-  of seconds to a couple of minutes).
-- **L = 4 bits: best-effort.** Recoverable, but right at the edge of what a
-  block-30 BKZ reduction can resolve at 256-bit, so it takes a few minutes
-  and two independent dimension attempts. Both test seeds recover; it is not
-  guaranteed for every key.
-- **L <= 3 bits: out of reach in practice.** L = 3 needs block_size >= 40 at
-  dimension >= 450 (> 15 min per attempt, no guarantee of convergence); L = 2
-  does not converge at feasible cost; L = 1 is out of scope entirely (a
-  genuine Fourier / Bleichenbacher attack there needs millions of same-key
-  signatures -- see De Mulder et al. CHES 2013, Osaki & Kunihiro SAC 2024,
-  Aranha et al. CCS 2020 -- which a wallet's on-chain history cannot supply).
-
-Give weak-bias cases a generous `--max-time` (e.g. `-t 400`): the L = 4-6 BKZ
-pass is budget-gated and is skipped if it cannot fit the remaining time.
-
-### Modulo / Extended-HNP (windowed zeros)
-
-Nonces with a zero window in the *middle* -- `k mod ω ∈ [0, bound)`, neither MSB
-(`k` is full-width) nor LSB (the low bits are free) -- are recovered by a
-two-block Extended-HNP lattice. Difficulty tracks the window width just like an
-MSB leak: a window of >= ~12 bits resolves under LLL in ~15s, while a narrow
-~8-bit window needs heavy BKZ and is best-effort (like MSB L=4). Supply the
-`(ω, bound)` hint the generator prints (`--modulo-omega/--modulo-bound`), or use
-`-m modulo` to sweep common windows.
-
-### Repeated-nonce and LCG (closed-form, no lattice)
-
-A reused nonce (two signatures sharing `r`) or an LCG-related nonce sequence
-(`k_{i+1} = a·k_i + b mod n`) hands over the key by modular algebra -- no lattice.
-Both run as cheap, pubkey-gated pre-scans on every recovery, so `-i file` alone
-catches them. The LCG solver recovers even when `a` and `b` are **unknown** (from
-five consecutive signatures, via a 4x4 modular solve) and retries in timestamp
-order so out-of-order logs still recover.
-
-## Concurrency
-
-Lattice reductions run **serially by design**. The independent trials look
-parallelizable, but fplll is not thread-safe for concurrent reductions (its LLL
-wrapper mutates a process-global MPFR precision, and BKZ calls LLL internally),
-so running two at once races and crashes. A threaded version was built and
-reverted for this reason. The only safe way to parallelize would be process
-(`fork`) isolation, one fplll per worker — not threads.
-
-The fplll BKZ pruning-strategy file is located via the `ECDSA_FPLLL_STRATEGY`
-environment variable if set, otherwise the standard install prefixes. Recovery
-still works without it (falling back to slower unpruned enumeration), so it is
-an optimization, not a hard dependency.
+Lattice reductions run serially. The linked reduction library changes shared
+process state during reduction, so concurrent reductions in one process are
+not safe. Set `ECDSA_FPLLL_STRATEGY` to override the pruning-strategy file; the
+program can continue with slower unpruned enumeration when it is unavailable.
 
 ## Testing
 
+Run the fast regression group after routine changes:
+
 ```bash
-./build/unit_tests                  # fast (a few seconds): math, transforms, validation, recovery paths, ECC edge cases
-ctest -R ecc_differential            # local ECC vs the trusted `ecdsa` library (edge + random)
-ctest -R e2e_recovery                # slow (~5min): real recovery against real ground truth
+ctest --test-dir build --output-on-failure \
+  -R '^(unit_tests|fplll_sanity|cli_validation)$'
 ```
 
-CI (`.github/workflows/ci.yml`) runs, on every push/PR: a warning-gated Release
-build, the unit + differential tests, an ASan/UBSan pass, and a bounded
-end-to-end recovery smoke test. Sanitizer builds are available locally via
-`cmake --preset asan`.
+Run the focused differential and end-to-end checks separately:
 
-## Where things live
+```bash
+ctest --test-dir build --output-on-failure -R '^ecc_differential$'
+ctest --test-dir build --output-on-failure -R '^e2e_recovery$'
+```
 
-- `src/lattice_solver.cpp` -- the core lattice recovery: the single-block
-  pivot-elimination + Kannan embedding (`build_boneh_venkatesan_basis` --
-  read its comment before touching it), and the two-block Extended-HNP lattice
-  for modulo/windowed bias (`recover_modulo`).
-- `src/bias_profiler.cpp` -- bias detection; `shrink_test_sweep` is the
-  shared core used by both MSB and LSB detection.
-- `src/recovery_engine.cpp` -- dispatch and routing: the closed-form
-  pre-scans (`try_repeated_nonce`, `try_linear_nonce`), modulo/EHNP routing
-  (`try_modulo`), the lattice paths (LATTICE vs FALLBACK), candidate
-  verification, and retry logic.
-- `src/verifier.cpp` -- genuine independent ECDSA verification.
-- `src/secp256k1.cpp` -- EC primitives.
-- `tests/unit_tests.cpp` / `tests/e2e_recovery_test.sh` -- the two test
-  suites above.
+CI also performs a warning-gated release build and sanitizer checks. Local
+sanitizer builds are available through the `asan` CMake preset.
 
-## More context
+## Project layout
 
-- `COMMANDS.md` -- complete CLI reference and build prerequisites.
+| Path | Responsibility |
+|---|---|
+| `src/lattice_solver.cpp` | Single-block and two-block lattice construction and reduction |
+| `src/bias_profiler.cpp` | MSB and LSB structure detection |
+| `src/recovery_engine.cpp` | Method selection, recovery orchestration, and candidate checks |
+| `src/verifier.cpp` | Independent ECDSA verification |
+| `src/secp256k1.cpp` | Elliptic-curve primitives |
+| `tests/` | Unit, CLI, differential, integration, and end-to-end checks |
+
+## Documentation
+
+[COMMANDS.md](COMMANDS.md) is the complete build, test, fixture-generation,
+runtime, option, and troubleshooting reference.
 
 ## License
 
-Released under the MIT License. See [`LICENSE`](LICENSE).
+Released under the MIT License. See [LICENSE](LICENSE).
