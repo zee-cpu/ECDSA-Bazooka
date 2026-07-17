@@ -4,3 +4,6 @@ build-*/
 # Generated signature fixtures -- regenerable via scripts/generate_mock_signatures.py,
 # not source. Kept out of the repo to stay lean.
 data/*.txt
+
+# Local agent planning artifacts
+docs/superpowers/
