@@ -1,398 +1,334 @@
-# ECDSA Nonce-Bias Key Recovery Engine — Command Reference
+# Command Reference
 
-This document gives the exact command set to build, test, and run the project.
+This is the complete build, test, fixture-generation, and runtime reference.
+See [README.md](README.md) for the project overview and practical limits.
 
-## 1. Project Layout
+Run commands from the repository root unless a section says otherwise.
 
-```
-ecdsa_nonce_recovery/
-├── CMakeLists.txt
-├── CMakePresets.json         ← release / debug / asan presets
-├── COMMANDS.md               ← this file
-├── README.md
-├── include/                  ← all .h headers
-├── src/                      ← all .cpp sources (compiled into ecdsa_recovery_core)
-├── scripts/
-│   └── generate_mock_signatures.py
-├── tests/
-│   ├── unit_tests.cpp        ← fast isolated unit tests
-│   ├── fplll_sanity.cpp
-│   └── e2e_recovery_test.sh
-├── build/                    ← created by cmake
-└── data/                     ← generated signature files
-```
+## Prerequisites
 
-## 2. Prerequisites (one-time)
+Ubuntu and Debian-based systems can install the required packages with:
 
 ```bash
-# Install system dependencies
 sudo apt-get update
 sudo apt-get install -y \
-    cmake g++ \
-    libgmp-dev libgmpxx4ldbl \
-    libfplll-dev libfplll9 \
-    libmpfr-dev \
-    python3-pip
+  cmake \
+  g++ \
+  libgmp-dev \
+  libgmpxx4ldbl \
+  libfplll-dev \
+  libfplll9 \
+  libmpfr-dev \
+  python3-pip
 
-# Python dependencies for mock generator
-pip3 install ecdsa
+python3 -m pip install ecdsa
 ```
 
-### Dependency / version matrix
+Use a Python virtual environment if your distribution does not allow global
+package installation.
 
-Tested against the versions below (Ubuntu 24.04). Others likely work; these are
-what the build and validation runs used.
+| Component | Requirement | Purpose |
+|---|---|---|
+| CMake | 3.16 minimum; 3.21 for presets | Configure and build |
+| C++ compiler | C++20 support | Compile the program and tests |
+| GMP and GMP C++ | 6.x tested | Multiprecision arithmetic |
+| fplll | 5.4.x tested | LLL and BKZ reduction |
+| MPFR | 4.x tested | fplll dependency |
+| Python | 3.10+ tested | Fixture generation and differential testing |
+| Python `ecdsa` | Optional for the main binary | Fixtures and differential testing |
 
-| Component     | Package (apt)              | Version tested | Required            |
-|---------------|----------------------------|----------------|---------------------|
-| CMake         | `cmake`                    | 3.28 (≥ 3.16; presets need ≥ 3.21) | yes |
-| C++ compiler  | `g++`                      | C++20 (GCC 13) | yes                 |
-| GMP           | `libgmp-dev`               | 6.x            | yes                 |
-| GMP C++       | `libgmpxx4ldbl`            | 6.x            | yes                 |
-| fplll         | `libfplll-dev` / `libfplll9` | 5.4.x        | yes                 |
-| MPFR          | `libmpfr-dev`              | 4.x            | yes (via fplll)     |
-| Python + ecdsa| `python3`, `pip install ecdsa` | 3.10+     | test data only      |
+FFTW is not required. The program looks for fplll's `default.json` pruning
+strategy in standard installation locations. Set
+`ECDSA_FPLLL_STRATEGY=/path/to/default.json` to use a specific file. Recovery
+can continue with slower unpruned enumeration if no strategy file is found.
 
-FFTW is **not** a dependency (the former FFT path was removed). fplll's bundled
-BKZ pruning strategy file (`default.json`) is used if found on a standard prefix;
-override its location with `ECDSA_FPLLL_STRATEGY=/path/to/default.json`.
+## Build
 
-## 3. Full Build (CMake + Make)
+CMake presets are the recommended build path.
 
-The recommended path is CMake presets (needs CMake ≥ 3.21):
+### Release build
 
 ```bash
-cd /home/user/ecdsa_nonce_recovery
-cmake --preset release          # configures into build/
-cmake --build --preset release -j$(nproc)
-ctest --preset release          # runs unit_tests + fplll_sanity + e2e
+cmake --preset release
+cmake --build --preset release -j"$(nproc)"
 ```
 
-Available presets: `release` (build/), `debug` (build-debug/), `asan`
-(build-asan/, AddressSanitizer + UBSan). The plain flow still works:
+Output directory: `build/`
+
+### Debug build
 
 ```bash
-rm -rf build && mkdir -p build data
-cd build && cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)                 # all targets
-make -j$(nproc) ecdsa_nonce_recovery   # or just the CLI
+cmake --preset debug
+cmake --build --preset debug -j"$(nproc)"
 ```
 
-All first-party code compiles into one library (`ecdsa_recovery_core`); the CLI
-and the unit tests both link it, so they exercise the same implementation.
+Output directory: `build-debug/`
 
-**Resulting binaries:**
-- `build/ecdsa_nonce_recovery` — main recovery tool
-- `build/unit_tests`           — fast isolated unit tests
-- `build/fplll_sanity_test`    — standalone fplll integration test
-
-## 4. Quick Sanity Check (fplll)
+### Sanitizer build
 
 ```bash
-cd /home/user/ecdsa_nonce_recovery/build
-./fplll_sanity_test
+cmake --preset asan
+cmake --build --preset asan -j"$(nproc)"
 ```
 
-Expected output contains:
-```
-[SUCCESS] fplll_sanity_test passed.
-```
+Output directory: `build-asan/`. This preset enables AddressSanitizer and
+UndefinedBehaviorSanitizer.
 
-## 5. Generate Mock Signature Data
+### Plain CMake build
 
-The Python script creates files exactly matching the required format and prints the **ground-truth private key**.
-
-### Basic usage
+Use this flow with CMake 3.16–3.20 or when presets are not desired:
 
 ```bash
-cd /home/user/ecdsa_nonce_recovery
-
-# MSB bias, 12 leaked bits, 800 signatures
-python3 scripts/generate_mock_signatures.py \
-    --count 800 \
-    --bias msb \
-    --bias-bits 12 \
-    --output data/msb_12b_800.txt \
-    --seed 424242
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
 ```
 
-### Other common test cases
+The release build produces:
+
+| Binary | Purpose |
+|---|---|
+| `build/ecdsa_nonce_recovery` | Main command-line program |
+| `build/unit_tests` | Fast isolated regression tests |
+| `build/fplll_sanity_test` | fplll integration check |
+| `build/ecc_diff_tool` | Helper for differential curve tests |
+
+## Test
+
+Configure and build the selected preset before running its tests.
+
+### Fast regression tests
+
+Use this group after routine changes:
 
 ```bash
-# High-bias (16 bits) — lattice should recover fast
-python3 scripts/generate_mock_signatures.py \
-    --count 1200 --bias msb --bias-bits 16 \
-    --output data/msb_16b_1200.txt --seed 12345
-
-# Moderate bias (8 bits) — needs more signatures
-python3 scripts/generate_mock_signatures.py \
-    --count 5000 --bias msb --bias-bits 8 \
-    --output data/msb_8b_5k.txt --seed 999
-
-# LSB bias
-python3 scripts/generate_mock_signatures.py \
-    --count 3000 --bias lsb --bias-bits 8 \
-    --output data/lsb_8b_3k.txt --seed 777
-
-# MODULO / Extended-HNP bias (Phase 6c) -- windowed zeros: k mod omega in
-# [0, bound). omega = 2^a, bound = 2^(a - bias_bits), so bias_bits is the width
-# of the zero window in the MIDDLE of the nonce (neither MSB nor LSB). The
-# generator prints the (omega, bound) recovery hint. A 12-bit window recovers
-# under LLL in ~15s; a narrow ~8-bit window is heavy-BKZ best-effort (like MSB
-# L=4), so use a comfortable window for a reliable run.
-python3 scripts/generate_mock_signatures.py \
-    --count 250 --bias modulo --bias-bits 12 --omega 65536 \
-    --output data/modulo_12b.txt --seed 41
-# ... then recover with the printed hint:
-#   ./ecdsa_nonce_recovery -i data/modulo_12b.txt --modulo-omega 65536 --modulo-bound 16 -q
-
-# LINEAR / LCG-related nonces (Phase 6d) -- k_{i+1} = a*k_i + b (mod n), emitted
-# in generation order with sequential timestamps. Recovered by closed-form
-# algebra (no lattice): a supplied (a,b) needs two consecutive sigs; UNKNOWN
-# (a,b) needs five (a 4x4 modular solve). The generator prints a and b.
-python3 scripts/generate_mock_signatures.py \
-    --count 40 --bias linear --output data/linear.txt --seed 44
-# ... recover with a,b unknown (nothing to supply):
-#   ./ecdsa_nonce_recovery -i data/linear.txt -q
-# ... or, if a,b are known, supply them (two consecutive sigs suffice):
-#   ./ecdsa_nonce_recovery -i data/linear.txt --lcg-a <a> --lcg-b <b> -q
-
-# No bias (should fail to recover)
-python3 scripts/generate_mock_signatures.py \
-    --count 1000 --bias none \
-    --output data/nobias_1k.txt --seed 42
+ctest --test-dir build --output-on-failure \
+  -R '^(unit_tests|fplll_sanity|cli_validation)$'
 ```
 
-**Important:** The script always prints the **ground-truth private key** at the end:
-```
-[+] Ground-truth private key (exact for verification): 0x...
+### Individual tests
+
+```bash
+ctest --test-dir build --output-on-failure -R '^unit_tests$'
+ctest --test-dir build --output-on-failure -R '^fplll_sanity$'
+ctest --test-dir build --output-on-failure -R '^cli_validation$'
+ctest --test-dir build --output-on-failure -R '^ecc_differential$'
+ctest --test-dir build --output-on-failure -R '^e2e_recovery$'
 ```
 
-### Optional: supplying known leaked nonce bits (side-channel data)
+The differential test exits successfully with a skip message when the Python
+`ecdsa` package is unavailable. The end-to-end test is the slowest case and has
+a ten-minute CTest timeout.
 
-Each signature block may carry an optional `KnownLow` field giving the *known*
-low bits of that signature's nonce `k` (e.g. recovered from a side channel):
+### Complete test preset
 
+```bash
+ctest --preset release
 ```
+
+This includes all registered tests, including the slower end-to-end case. For
+the sanitizer build, use `ctest --preset asan`.
+
+## Generate fixtures
+
+The generator writes records in the accepted input format and prints the
+ground-truth value. It also prints applicable modulo or linear parameters.
+
+### MSB and LSB examples
+
+```bash
+python3 scripts/generate_mock_signatures.py \
+  --count 800 --bias msb --bias-bits 12 \
+  --output data/msb_12b_800.txt --seed 424242
+
+python3 scripts/generate_mock_signatures.py \
+  --count 1200 --bias lsb --bias-bits 8 \
+  --output data/lsb_8b_1200.txt --seed 777
+```
+
+### Modulo-window example
+
+This example constrains `k mod 65536` to a 12-bit-narrower interval. The
+generator prints the corresponding period and bound.
+
+```bash
+python3 scripts/generate_mock_signatures.py \
+  --count 250 --bias modulo --bias-bits 12 --omega 65536 \
+  --output data/modulo_12b.txt --seed 41
+```
+
+### Linear-sequence example
+
+```bash
+python3 scripts/generate_mock_signatures.py \
+  --count 40 --bias linear --lcg-a 3 --lcg-b 7 \
+  --output data/linear.txt --seed 44
+```
+
+Omit `--lcg-a` and `--lcg-b` to let the generator choose and print them.
+
+### Unstructured example
+
+Use this as a negative fixture. A successful candidate is not expected.
+
+```bash
+python3 scripts/generate_mock_signatures.py \
+  --count 1000 --bias none \
+  --output data/unstructured_1k.txt --seed 42
+```
+
+See every generator option with:
+
+```bash
+python3 scripts/generate_mock_signatures.py --help
+```
+
+## Run the program
+
+### Automatic selection
+
+Automatic selection is the default. The live dashboard is enabled unless `-q`
+is supplied.
+
+```bash
+./build/ecdsa_nonce_recovery -i data/msb_12b_800.txt
+./build/ecdsa_nonce_recovery -i data/msb_12b_800.txt -q
+```
+
+The automatic path first checks inexpensive repeated and linear relationships,
+then profiles the remaining input and selects an appropriate lattice route.
+
+### Select a method
+
+```bash
+./build/ecdsa_nonce_recovery -i data/msb_12b_800.txt -m lattice -v
+./build/ecdsa_nonce_recovery -i data/unstructured_1k.txt -m fallback -v
+./build/ecdsa_nonce_recovery -i data/modulo_12b.txt -m modulo -v
+./build/ecdsa_nonce_recovery -i data/linear.txt -m linear -v
+```
+
+`fallback` runs a wider lattice sweep. `modulo` searches common windows when no
+parameters are supplied. `linear` widens the linear-sequence scan.
+
+### Provide modulo parameters
+
+Use the period and bound printed by the generator:
+
+```bash
+./build/ecdsa_nonce_recovery -i data/modulo_12b.txt \
+  --modulo-omega 65536 --modulo-bound 16 -v
+```
+
+Both options are required together. Values must be positive, and the bound
+must be smaller than the period.
+
+### Provide linear parameters
+
+```bash
+./build/ecdsa_nonce_recovery -i data/linear.txt \
+  --lcg-a 3 --lcg-b 7 -v
+```
+
+`--lcg-b` requires `--lcg-a`. The increment defaults to zero when only the
+multiplier is supplied. Without either option, the program can infer unknown
+parameters from five consecutive signatures.
+
+### Limit work
+
+```bash
+./build/ecdsa_nonce_recovery -i data/msb_12b_800.txt \
+  --max-sigs 500 --max-time 60 --seed 0x1234 -q
+```
+
+`--max-sigs` is a decimal count and `--max-time` accepts non-negative seconds.
+The sampling seed and numeric hints accept decimal or `0x`-prefixed values.
+
+## CLI options
+
+| Option | Purpose | Default |
+|---|---|---|
+| `-i, --input FILE` | Input signature file | required |
+| `-m, --method METHOD` | `auto`, `lattice`, `fallback`, `modulo`, or `linear` | `auto` |
+| `-s, --max-sigs N` | Maximum signatures to use | all |
+| `-t, --max-time SEC` | Time budget in seconds | unlimited |
+| `-v, --verbose` | Enable the live dashboard | on |
+| `-q, --quiet` | Disable live updates | off |
+| `--allow-no-pubkey` | Allow an unverifiable best-effort result | off |
+| `--seed N` | Sampling seed in decimal or `0x` notation | fixed |
+| `--modulo-omega N` | Modulo period | unset |
+| `--modulo-bound N` | Residue bound paired with the period | unset |
+| `--lcg-a N` | Linear multiplier | unset |
+| `--lcg-b N` | Linear increment; requires `--lcg-a` | `0` |
+| `-h, --help` | Show command help | — |
+
+Show the live help at any time:
+
+```bash
+./build/ecdsa_nonce_recovery --help
+```
+
+## Optional input annotations
+
+Each input record requires `R`, `S`, and `Z`. A public key is required by
+default. `KnownLow` can supply an exact low-bit residue for each nonce:
+
+```text
 Signature #1
-  R = ...
-  S = ...
-  Z = ...
-  PubKey: 04...
-  KnownLow: 8 0xab      # low 8 bits of k are known to be 0xab  (k ≡ 0xab mod 2^8)
+R = ...
+S = ...
+Z = ...
+PubKey: 04...
+KnownLow: 8 0xab
 ```
 
-Format is `KnownLow: <bits> <value_hex>`, with `1 ≤ bits ≤ 64` and
-`0 ≤ value < 2^bits`. When **every** signature in the file carries the same
-`bits` width, the tool skips statistical bias detection and recovers directly
-from the supplied constraint (generalizing the low-bits-are-zero case to any
-known residue). Partial or mixed-width annotation is ignored and the tool falls
-back to normal detection. As always, a reported key is verified against the
-PubKey, so a wrong leak simply fails to recover — it never yields a bad key.
+`KnownLow: 8 0xab` means `k ≡ 0xab (mod 2^8)`. The width must be from 1 through
+64, and the value must fit within that width. Malformed or duplicate
+annotations cause the affected record to be rejected.
 
-## 6. Run the Recovery Tool
+Exact-constraint routing requires every usable signature to carry the same
+width; the residue value may differ per signature. Partial or mixed-width sets
+fall back to normal structure detection.
 
-### Basic run (quiet — for logs/scripts)
+## Expected behavior
+
+These are practical guidelines, not fixed performance guarantees.
+
+| Input pattern | Typical size | Expected path | Guidance |
+|---|---:|---|---|
+| MSB or LSB, 7+ bits | 500–2,000 | LLL | Normally fast for suitable inputs |
+| MSB or LSB, 5–6 bits | 1,000–2,000 | Focused BKZ | Can require a larger time budget |
+| MSB or LSB, 4 bits | Around 2,000 | Heavier BKZ | Best-effort; can require minutes |
+| MSB or LSB, 3 bits or fewer | — | — | Outside practical scope |
+| Modulo window, about 12+ bits | 250–500 | Extended-HNP with LLL | Normally the easier modulo case |
+| Modulo window, about 8 bits | 500+ | Extended-HNP with BKZ | Best-effort and potentially slow |
+| Repeated value | 2 | Closed-form | Automatic pre-scan |
+| Linear sequence, unknown parameters | 5+ | Closed-form | Uses consecutive records |
+| Linear sequence, known parameters | 2+ | Closed-form | Supply `--lcg-a` and optional `--lcg-b` |
+| Unstructured input | any | No candidate | Expected to report failure |
+
+For weaker constraints, provide a comfortable `--max-time`. A BKZ attempt can
+be skipped when the remaining budget is too small to run it.
+
+## Clean and rebuild
+
+Clean generated build outputs without deleting the build directory, then
+rebuild the release preset:
 
 ```bash
-cd /home/user/ecdsa_nonce_recovery/build
-
-./ecdsa_nonce_recovery \
-    -i ../data/msb_12b_800.txt \
-    -q
+cmake --build --preset release --target clean
+cmake --build --preset release -j"$(nproc)"
 ```
 
-### Run with live dashboard (recommended for real use)
+Rerun `cmake --preset release` first after changing CMake configuration files.
 
-```bash
-./ecdsa_nonce_recovery \
-    -i ../data/msb_12b_800.txt \
-    -v
-```
+## Troubleshooting
 
-The dashboard updates every ~120ms and shows:
-- Signatures loaded / valid
-- Detected bias type + leaked bits + confidence (σ)
-- Active recovery method
-- Lattice progress (leak level L, LLL/BKZ, dimension)
-- Final result + verification status
-
-### Force a specific method (debugging)
-
-```bash
-# Force lattice only
-./ecdsa_nonce_recovery -i ../data/msb_12b_800.txt -m lattice -v
-
-# Force fallback ladder (wider lattice sweep for weak/undetected bias)
-./ecdsa_nonce_recovery -i ../data/nobias_1k.txt -m fallback -v
-```
-
-### Modulo / Extended-HNP recovery (Phase 6c)
-
-For windowed-zero nonces (`k mod ω ∈ [0, bound)` — a zero window in the *middle*
-of the nonce, neither MSB nor LSB), supply the `(ω, bound)` the generator prints
-and recovery routes to the two-block EHNP lattice:
-
-```bash
-# Deterministic hint path (recommended): solve exactly the supplied window
-./ecdsa_nonce_recovery -i ../data/modulo_12b.txt \
-    --modulo-omega 65536 --modulo-bound 16 -v
-
-# Blind sweep over common windows when ω is unknown (opt-in; each wrong guess
-# costs a full lattice reduction, so it is NOT run from plain `auto`)
-./ecdsa_nonce_recovery -i ../data/modulo_12b.txt -m modulo -v
-```
-
-Every candidate is verified against the PubKey, so a wrong `(ω, bound)` guess
-simply fails to recover — it never yields an incorrect key.
-
-### Linearly-related / LCG nonces (Phase 6d)
-
-If nonces come from a linear congruential generator (`k_{i+1} = a·k_i + b mod n`),
-consecutive signatures give the key by closed-form algebra — no lattice. This runs
-automatically on every `auto` recovery (a cheap, PubKey-gated pre-scan), so
-usually you need supply nothing:
-
-```bash
-# a, b UNKNOWN: five consecutive signatures -> a 4x4 modular solve -> d
-./ecdsa_nonce_recovery -i ../data/linear.txt -v
-
-# a, b known: two consecutive signatures suffice
-./ecdsa_nonce_recovery -i ../data/linear.txt --lcg-a <a> --lcg-b <b> -v
-```
-
-Signatures are taken in file order, then retried in timestamp order (the LCG
-advances in generation time), so out-of-order logs still recover. PubKey-gated:
-a spurious solve on non-LCG data is discarded, never returned.
-
-### Limit resources
-
-```bash
-# Use at most 1500 signatures
-./ecdsa_nonce_recovery -i ../data/msb_8b_5k.txt -s 1500 -v
-
-# Max 30 seconds
-./ecdsa_nonce_recovery -i ../data/msb_8b_5k.txt -t 30 -v
-```
-
-## 7. Full Test Workflow (Recommended)
-
-```bash
-cd /home/user/ecdsa_nonce_recovery
-
-# 1. Build everything
-rm -rf build && mkdir -p build data
-cd build
-cmake .. && make -j$(nproc)
-
-# 2. Run fplll sanity
-./fplll_sanity_test
-
-# 3. Generate a realistic test set
-cd ..
-python3 scripts/generate_mock_signatures.py \
-    --count 2000 --bias msb --bias-bits 12 \
-    --output data/test_msb12_2k.txt --seed 123
-
-# 4. Run with live UI and watch dashboard
-cd build
-./ecdsa_nonce_recovery -i ../data/test_msb12_2k.txt -v
-
-# 5. Compare recovered key against printed ground-truth
-# (the tool prints the recovered d on success)
-```
-
-## 8. Verifying Correctness (Ground Truth)
-
-After every recovery run:
-
-1. The generator printed: `Ground-truth private key: 0x<hex>`
-2. The C++ tool (on success) prints: `d = 0x<hex>`
-3. They must match **exactly**.
-
-You can also do it programmatically:
-
-```bash
-# Example after running the tool
-GROUND_TRUTH="0x88a0a8b792e19f1a915a7f79df5bab03e57e02d0147f2e18adc67c94c8065965"
-RECOVERED="..."   # copy from tool output
-
-if [ "$GROUND_TRUTH" = "$RECOVERED" ]; then
-    echo "MATCH ✓"
-else
-    echo "MISMATCH ✗"
-fi
-```
-
-## 9. Clean / Rebuild Commands
-
-```bash
-cd /home/user/ecdsa_nonce_recovery
-
-# Full clean rebuild
-rm -rf build
-mkdir -p build
-cd build
-cmake ..
-make -j$(nproc)
-
-# Just recompile changed files
-cd build && make -j$(nproc)
-```
-
-## 10. Common Flags Summary
-
-| Flag                  | Meaning                              | Default   |
-|-----------------------|--------------------------------------|-----------|
-| `-i FILE` / `--input` | Signature file (required)            | —         |
-| `-m METHOD`           | `auto \| lattice \| fallback \| modulo \| linear` | `auto`    |
-| `-s N`                | Max signatures to use                | all       |
-| `-t SEC`              | Max time budget                      | unlimited |
-| `-v`                  | Live telemetry dashboard             | on        |
-| `-q`                  | Quiet (no live updates)              | off       |
-| `--allow-no-pubkey`   | Best-effort recovery w/o PubKey (unverifiable) | off |
-| `--seed N`            | Sampling RNG seed (hex or decimal), for reproducibility | fixed |
-| `--modulo-omega N`    | Modulo/EHNP hint: period ω (k mod ω in [0, bound)) | — |
-| `--modulo-bound N`    | Modulo/EHNP hint: residue bound (use with `--modulo-omega`) | — |
-| `--lcg-a N`           | Linear-nonce hint: LCG multiplier a (k_{i+1}=a·k_i+b mod n) | — |
-| `--lcg-b N`           | Linear-nonce hint: LCG increment b (default 0; use with `--lcg-a`) | — |
-| `-h`                  | Help                                 | —         |
-
-## 11. Expected Behavior per Bias Level
-
-| Bias Type | Leaked Bits | Signatures | Expected Method | Notes |
-|-----------|-------------|------------|------------------|-------|
-| MSB/LSB   | ≥ 7         | 500–2000   | Lattice (LLL)    | Fast, seconds |
-| MSB/LSB   | 5–6         | ~1000–2000 | Lattice (BKZ b=30) | Tens of sec to ~2 min |
-| MSB/LSB   | 4           | ~2000      | Lattice (BKZ b=30) | Best-effort, few min, not guaranteed for every key |
-| MSB/LSB   | ≤ 3         | —          | —                | Out of reach in practice (see README feasibility notes) |
-| MODULO (window ≥ ~12) | window bits | 250–500 | MODULO (Extended-HNP) | k mod ω in [0,bound); needs `--modulo-omega/--modulo-bound` hint or `-m modulo`; LLL, ~15s |
-| MODULO (window ~8) | window bits | 500+ | MODULO (Extended-HNP) | Best-effort, heavy BKZ, minutes, not guaranteed (like MSB L=4) |
-| LINEAR (LCG) | n/a | 5 (unknown a,b) / 2 (known) | LINEAR (LCG nonces) | Closed-form, no lattice, sub-second; auto pre-scan, PubKey-gated |
-| none      | 0           | any        | Reports failure  | No false positives |
-
-## 12. Troubleshooting
-
-- **"No signatures parsed"** → Check file format (must have "Signature #N" blocks)
-- **fplll not found at configure** → `sudo apt-get install libfplll-dev`
-- **Live dashboard looks frozen** → Run with `-v` in a real terminal (not piped to file)
-- **Wrong key recovered** → Always compare exactly against generator output. Verify that verification step passed.
-- **Compile errors about `mpz_class`** → The project already follows the `static_cast<unsigned long>` rule for 64-bit values.
-
-## 13. One-Liner Full Demo
-
-```bash
-cd /home/user/ecdsa_nonce_recovery && \
-rm -rf build && mkdir -p build data && \
-cd build && cmake .. && make -j$(nproc) && \
-cd .. && \
-python3 scripts/generate_mock_signatures.py --count 1500 --bias msb --bias-bits 12 --output data/demo.txt --seed 42 && \
-cd build && \
-./ecdsa_nonce_recovery -i ../data/demo.txt -v
-```
-
-Copy the ground-truth key printed by the generator and compare it with the key reported by the tool.
-
----
-
-**Project is ready for all Section 9 acceptance tests once you run the above workflow on the generated files.**
+| Problem | Check |
+|---|---|
+| No signatures parsed | Confirm the file uses `Signature #N` records with valid `R`, `S`, and `Z` fields. |
+| fplll missing during configuration | Install `libfplll-dev` and rerun the CMake configure step. |
+| Dashboard output looks frozen or messy | Use `-q` when redirecting output or writing logs. |
+| A low-bit-count case stops without an attempt | Increase `--max-time`; expensive BKZ passes are budget-gated. |
+| Modulo options are rejected | Supply both options and keep `0 < bound < omega < n`. |
+| Linear options are rejected | Supply `--lcg-a` before `--lcg-b`; values must be within the accepted scalar range. |
+| Differential test reports a skip | Install the Python `ecdsa` package. |
+| Pruning strategy cannot be found | Set `ECDSA_FPLLL_STRATEGY` to the installed `default.json`; unpruned fallback remains available. |
