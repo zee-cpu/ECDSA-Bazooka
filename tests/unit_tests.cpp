@@ -16,6 +16,7 @@
 #include <iostream>
 #include <cmath>
 #include <random>
+#include <type_traits>
 #include <vector>
 #include <algorithm>
 
@@ -116,10 +117,12 @@ void test_pivot_elimination_algebra() {
     std::mt19937_64 rng(999);
     std::uniform_int_distribution<uint64_t> dist;
 
-    auto rand_mpz = [&]() {
+    auto rand_mpz = [&]() -> mpz {
         mpz v = (mpz(dist(rng)) << 192) + (mpz(dist(rng)) << 128) + (mpz(dist(rng)) << 64) + dist(rng);
-        return v % N;
+        return mpz(v % N);
     };
+    check((std::is_same_v<decltype(rand_mpz()), mpz>),
+          "random scalar helper returns an owning mpz value");
 
     mpz d = rand_mpz();
     if (d == 0) d = 1;
@@ -564,14 +567,22 @@ void test_linear_nonce() {
     // exhaustive candidate search on unrecoverable data.
     {
         std::mt19937_64 rng(0xA5A5A5A5ULL);
-        auto rand255 = [&]() { mpz v = 0; for (int i = 0; i < 8; ++i) { v <<= 32; v += static_cast<unsigned long>(rng() & 0xffffffffULL); } return v % n; };
+        auto rand255 = [&]() -> mpz { mpz v = 0; for (int i = 0; i < 8; ++i) { v <<= 32; v += static_cast<unsigned long>(rng() & 0xffffffffULL); } return mpz(v % n); };
+        check((std::is_same_v<decltype(rand255()), mpz>),
+              "random non-LCG helper returns an owning mpz value");
         std::vector<Signature> sigs;
+        std::vector<mpz> generated_ks;
         for (size_t i = 0; i < 8; ++i) {
             mpz k = rand255(); if (k == 0) k = 1;
+            generated_ks.push_back(k);
             Signature s = make_sig(d, mpz(8000 + static_cast<long>(i)), k, pubkey, i + 1);
             s.timestamp = static_cast<int64_t>(i + 1);
             sigs.push_back(s);
         }
+        auto sorted_ks = generated_ks;
+        std::sort(sorted_ks.begin(), sorted_ks.end());
+        check(std::adjacent_find(sorted_ks.begin(), sorted_ks.end()) == sorted_ks.end(),
+              "random non-LCG fixture uses distinct nonces");
         Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
         RecoveryEngine engine(tel);
         RecoveryResult res = engine.run(sigs, pairs, RecoveryMethod::LINEAR);
