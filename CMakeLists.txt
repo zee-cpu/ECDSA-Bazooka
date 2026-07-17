@@ -101,6 +101,12 @@ add_test(NAME unit_tests COMMAND unit_tests)
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 30)
 add_test(NAME fplll_sanity COMMAND fplll_sanity_test)
 
+add_test(
+    NAME cli_validation
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_validation_test.sh
+            $<TARGET_FILE:ecdsa_nonce_recovery>
+)
+
 # Differential ECC test vs the trusted `ecdsa` Python library. Skips itself
 # (exit 0) if that library isn't installed, so it never blocks a build that
 # lacks the optional test dependency.

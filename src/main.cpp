@@ -5,10 +5,14 @@
 #include "telemetry.h"
 #include "utils.h"
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <chrono>
+#include <cmath>
 #include <getopt.h>
 #include <cstdlib>
+#include <limits>
+#include <optional>
 
 static void print_usage(const char* prog) {
     std::cout << "ECDSA Nonce-Bias Key Recovery Engine (Lattice HNP: LLL/BKZ)\n\n";
@@ -33,12 +37,55 @@ static void print_usage(const char* prog) {
     std::cout << "  " << prog << " -i data/test_msb_16b_2k.txt -v\n";
 }
 
-RecoveryMethod parse_method(const std::string& s) {
+std::optional<RecoveryMethod> parse_method(const std::string& s) {
     if (s == "lattice") return RecoveryMethod::LATTICE;
     if (s == "fallback") return RecoveryMethod::FALLBACK;
     if (s == "modulo") return RecoveryMethod::MODULO;
     if (s == "linear") return RecoveryMethod::LINEAR;
-    return RecoveryMethod::AUTO;
+    if (s == "auto") return RecoveryMethod::AUTO;
+    return std::nullopt;
+}
+
+static bool parse_size_arg(const char* text, size_t& out) {
+    if (text == nullptr || text[0] == '\0' || text[0] == '-') return false;
+    try {
+        size_t consumed = 0;
+        unsigned long long value = std::stoull(text, &consumed, 10);
+        if (consumed != std::string(text).size() ||
+            value > std::numeric_limits<size_t>::max()) return false;
+        out = static_cast<size_t>(value);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+static bool parse_time_arg(const char* text, double& out) {
+    if (text == nullptr || text[0] == '\0') return false;
+    try {
+        size_t consumed = 0;
+        double value = std::stod(text, &consumed);
+        if (consumed != std::string(text).size() || !std::isfinite(value) || value < 0.0)
+            return false;
+        out = value;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+static bool parse_seed_arg(const char* text, uint64_t& out) {
+    if (text == nullptr || text[0] == '\0' || text[0] == '-') return false;
+    try {
+        size_t consumed = 0;
+        unsigned long long value = std::stoull(text, &consumed, 0);
+        if (consumed != std::string(text).size() ||
+            value > std::numeric_limits<uint64_t>::max()) return false;
+        out = static_cast<uint64_t>(value);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -54,6 +101,10 @@ int main(int argc, char** argv) {
     mpz modulo_bound = 0;
     mpz lcg_a = 0;          // Phase 6d hint
     mpz lcg_b = 0;
+    bool modulo_omega_supplied = false;
+    bool modulo_bound_supplied = false;
+    bool lcg_a_supplied = false;
+    bool lcg_b_supplied = false;
 
     enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001,
            OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003,
@@ -83,13 +134,24 @@ int main(int argc, char** argv) {
                 input_file = optarg;
                 break;
             case 'm':
-                force_method = parse_method(optarg);
+                if (auto parsed = parse_method(optarg)) {
+                    force_method = *parsed;
+                } else {
+                    std::cerr << "Error: unknown --method '" << optarg << "'\n";
+                    return 1;
+                }
                 break;
             case 's':
-                max_sigs = std::stoull(optarg);
+                if (!parse_size_arg(optarg, max_sigs)) {
+                    std::cerr << "Error: invalid --max-sigs value\n";
+                    return 1;
+                }
                 break;
             case 't':
-                max_time = std::stod(optarg);
+                if (!parse_time_arg(optarg, max_time)) {
+                    std::cerr << "Error: invalid --max-time value\n";
+                    return 1;
+                }
                 break;
             case 'v':
                 verbose = true;
@@ -103,27 +165,34 @@ int main(int argc, char** argv) {
                 allow_no_pubkey = true;
                 break;
             case OPT_SEED:
-                sampling_seed = std::stoull(optarg, nullptr, 0);  // accepts 0x.. or decimal
+                if (!parse_seed_arg(optarg, sampling_seed)) {
+                    std::cerr << "Error: invalid --seed value\n";
+                    return 1;
+                }
                 break;
             case OPT_MOD_OMEGA:
                 if (modulo_omega.set_str(optarg, 0) != 0) {  // 0 = auto-detect base (0x/dec)
                     std::cerr << "Error: invalid --modulo-omega value\n"; return 1;
                 }
+                modulo_omega_supplied = true;
                 break;
             case OPT_MOD_BOUND:
                 if (modulo_bound.set_str(optarg, 0) != 0) {
                     std::cerr << "Error: invalid --modulo-bound value\n"; return 1;
                 }
+                modulo_bound_supplied = true;
                 break;
             case OPT_LCG_A:
                 if (lcg_a.set_str(optarg, 0) != 0) {
                     std::cerr << "Error: invalid --lcg-a value\n"; return 1;
                 }
+                lcg_a_supplied = true;
                 break;
             case OPT_LCG_B:
                 if (lcg_b.set_str(optarg, 0) != 0) {
                     std::cerr << "Error: invalid --lcg-b value\n"; return 1;
                 }
+                lcg_b_supplied = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -146,12 +215,32 @@ int main(int argc, char** argv) {
 
     // Phase 6c: the modulo hint is a pair -- one without the other is a usage
     // error (a lone omega has no residue bound to constrain against).
-    if ((modulo_omega > 0) != (modulo_bound > 0)) {
+    if (modulo_omega_supplied != modulo_bound_supplied) {
         std::cerr << "Error: --modulo-omega and --modulo-bound must be given together\n";
         return 1;
     }
-    if (modulo_omega > 0 && modulo_bound >= modulo_omega) {
+    if (modulo_omega_supplied && (modulo_omega <= 0 || modulo_bound <= 0)) {
+        std::cerr << "Error: modulo hints must be positive\n";
+        return 1;
+    }
+    if (modulo_omega_supplied && modulo_omega >= SECP256K1_N) {
+        std::cerr << "Error: --modulo-omega must be smaller than the curve order\n";
+        return 1;
+    }
+    if (modulo_omega_supplied && modulo_bound >= modulo_omega) {
         std::cerr << "Error: --modulo-bound must be smaller than --modulo-omega\n";
+        return 1;
+    }
+    if (lcg_b_supplied && !lcg_a_supplied) {
+        std::cerr << "Error: --lcg-b requires --lcg-a\n";
+        return 1;
+    }
+    if (lcg_a_supplied && (lcg_a <= 0 || lcg_a >= SECP256K1_N)) {
+        std::cerr << "Error: --lcg-a must be in [1, n)\n";
+        return 1;
+    }
+    if (lcg_b_supplied && (lcg_b < 0 || lcg_b >= SECP256K1_N)) {
+        std::cerr << "Error: --lcg-b must be in [0, n)\n";
         return 1;
     }
 
