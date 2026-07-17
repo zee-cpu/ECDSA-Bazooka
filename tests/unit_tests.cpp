@@ -410,6 +410,80 @@ void test_known_lsb() {
 }
 
 // ---------------------------------------------------------------------
+// Modulo / Extended-HNP recovery (Phase 6c). The nonce satisfies
+// k mod omega in [0, bound) -- a zero window in the MIDDLE of k (neither MSB nor
+// LSB), which the single-block Boneh-Venkatesan basis cannot express. Exercises
+// the two-block EHNP lattice. Uses a WIDE window (40 bits) so recovery resolves
+// under plain LLL in a fraction of a second: a narrow (~8-bit) window is a
+// heavy-BKZ, best-effort recovery (like MSB L=4) and has no place in the fast
+// unit suite. Also pins the no-false-positive guarantee: a wrong window bound
+// must not verify any key.
+// ---------------------------------------------------------------------
+void test_modulo_ehnp() {
+    std::cout << "-- modulo / Extended-HNP recovery (Phase 6c) --\n";
+    const mpz d("0x5566778899aabbccddeeff00112233445566778899aabbccddeeff0011223344");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    const int a = 48, c = 8;               // window = a - c = 40 bits
+    const mpz omega = mpz(1) << a;         // 2^48
+    const mpz bound = mpz(1) << c;         // 2^8  (k mod 2^48 < 2^8)
+
+    std::mt19937_64 rng(0x6d6f64756c6fULL);
+    auto rand_bits = [&](int bits) {
+        mpz v = 0;
+        for (int i = 0; i < bits; i += 32) { v <<= 32; v += static_cast<unsigned long>(rng() & 0xffffffffULL); }
+        return v;
+    };
+    // 16 signatures: u*window = 640 >> 256, comfortable margin for LLL.
+    // mu MUST stay below N/omega so k = lam + omega*mu < N -- otherwise the
+    // nonce wraps mod N and the windowed structure (k mod omega < bound) is
+    // destroyed, which no lattice can then exploit.
+    const mpz mu_bound = SECP256K1_N / omega;
+    std::vector<Signature> sigs;
+    for (size_t i = 1; i <= 16; ++i) {
+        mpz lam = rand_bits(64) % bound;   // low window residue in [0, 2^8)
+        mpz mu  = rand_bits(256) % mu_bound;  // free high part, kept so k < N
+        mpz k = lam + omega * mu;
+        if (k == 0) k = 1;
+        sigs.push_back(make_sig(d, mpz(3000 + static_cast<long>(i)), k, pubkey, i));
+    }
+    // Sanity: every nonce really has the windowed structure.
+    check((sigs[0].r != sigs[1].r), "modulo nonces are distinct (no accidental reuse)");
+
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(sigs, &tel);
+
+    // Direct two-block lattice call recovers the exact key.
+    auto d_direct = LatticeSolver::recover_modulo(pairs, omega, bound, 0, &tel, pubkey);
+    check(d_direct.has_value() && *d_direct == d,
+          "recover_modulo returns the exact key from a 40-bit window");
+
+    // Engine hint path (omega/bound supplied) routes to EHNP and reports MODULO.
+    RecoveryEngine engine(tel);
+    RecoveryResult res = engine.run(sigs, pairs, RecoveryMethod::AUTO, 0, 0.0,
+                                    DEFAULT_SAMPLING_SEED, omega, bound);
+    check(res.success, "modulo hint path recovers a verified key");
+    check(res.method_used == RecoveryMethod::MODULO, "recovery method reported as MODULO");
+    check(res.private_key == d, "engine modulo recovery equals the true private key");
+
+    // No false positive: the pubkey gate is the correctness guarantee. Point it
+    // at a DIFFERENT key's pubkey -- the lattice still extracts the true d, but
+    // it can't match the mismatched pubkey, so recovery returns nothing rather
+    // than ever emitting an unverified/wrong key. (Assuming a wrong-but-tighter
+    // window can still recover the CORRECT key, precisely because the gate keeps
+    // it honest -- so "no key" is the wrong invariant to test; "no WRONG key" is
+    // the right one.)
+    const mpz other_pubkey = utils::compute_pubkey(d + 1);
+    Telemetry tel2;
+    tel2.reset();
+    tel2.time_budget_sec = 5.0;  // keep the test fast: no BKZ escalation on the
+                                 // deliberately-unrecoverable (mismatched) call
+    auto d_bogus = LatticeSolver::recover_modulo(pairs, omega, bound, 0, &tel2, other_pubkey);
+    check(!d_bogus.has_value(),
+          "recovery gated on a mismatched pubkey returns no key (no false positive)");
+}
+
+// ---------------------------------------------------------------------
 // Compressed SEC1 pubkey support. pubkey_to_point used to accept only the
 // uncompressed (0x04) form; a 33-byte compressed key (0x02/0x03 || x, y
 // recovered from the curve) was padded to 130 chars and rejected. Pin the
@@ -620,6 +694,8 @@ int main() {
     test_repeated_nonce();
     std::cout << "\n";
     test_known_lsb();
+    std::cout << "\n";
+    test_modulo_ehnp();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

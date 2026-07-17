@@ -64,6 +64,25 @@ for case in "msb:12:500:11" "msb:16:400:12" "msb:8:1200:13" "lsb:12:500:31" "lsb
 done
 
 echo
+echo "=== E2E: modulo / Extended-HNP (windowed-zero) bias ==="
+# k mod 2^16 in [0, 2^4): a 12-bit zero window in the MIDDLE of the nonce --
+# neither MSB (k is full-width) nor LSB (low bits free) -- so the single-block
+# lattice can't touch it. Recovered via the two-block EHNP lattice, given the
+# (omega, bound) hint the generator prints. A 12-bit window resolves under LLL
+# in ~15s; a narrow ~8-bit window is heavy-BKZ best-effort (like MSB L=4) and is
+# deliberately not asserted here. Outer timeout stays above -t as a safety net.
+f="$WORKDIR/modulo_12b.txt"
+gen_out=$(python3 "$GEN" --count 250 --bias modulo --bias-bits 12 --omega 65536 \
+                --output "$f" --seed 41 2>&1)
+gt=$(echo "$gen_out" | grep -oE '0x[0-9a-fA-F]+' | head -1)
+run_out=$(timeout 160 "$BINARY" -i "$f" -q -t 120 --modulo-omega 65536 --modulo-bound 16 2>&1)
+recovered=$(echo "$run_out" | grep -oE '^\s*d = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
+echo "$run_out" | grep -q '\[SUCCESS\]'
+check "MODULO 12-bit window (250 sigs): reports SUCCESS" "$?"
+if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; fi
+check "MODULO 12-bit window: recovered key matches ground truth" "$match"
+
+echo
 echo "=== E2E: unbiased data must NOT produce a false recovery ==="
 f="$WORKDIR/none.txt"
 python3 "$GEN" --count 800 --bias none --bias-bits 0 --output "$f" --seed 21 > /dev/null 2>&1

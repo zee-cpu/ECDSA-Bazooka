@@ -34,6 +34,29 @@ public:
         mpz& scaling_factor
     );
 
+    // Phase 6c -- Extended-HNP (EHNP) recovery for modulo / windowed-zero bias.
+    // The nonce satisfies k mod omega in [0, bound): with omega and bound powers
+    // of two this zeroes the bit window [log2(bound), log2(omega)) while leaving
+    // BOTH the low bits AND the entire high part of k free. That is neither MSB
+    // (k is full-width) nor LSB (the low bits are not fixed), so the single-small-
+    // unknown Boneh-Venkatesan basis above cannot express it. This builds the
+    // two-block lattice instead -- one unknown for the small low window (lambda,
+    // bounded by `bound`) and one for the free high part (mu ~ N/omega) per
+    // signature -- reduces it, and returns d, verified against pubkey_hint when
+    // one is supplied. Feasible when signatures * window_bits exceeds ~256; the
+    // recovery difficulty scales like an MSB leak of ~window_bits (a wide window
+    // resolves under LLL in seconds; a narrow one, ~8 bits, needs heavy BKZ and
+    // is best-effort, exactly as MSB L=4 is). Returns nullopt if the window is
+    // too narrow, there are too few signatures, or nothing verifies.
+    static std::optional<mpz> recover_modulo(
+        const std::vector<Pair>& pairs,
+        const mpz& omega,
+        const mpz& bound,
+        size_t max_signatures = 0,
+        Telemetry* telemetry = nullptr,
+        const mpz& pubkey_hint = mpz(0)
+    );
+
     // Perform lattice reduction and extract a candidate d. bkz_block_size
     // == 0 uses plain LLL (fast, sufficient for most cases actually seen
     // so far); > 0 uses BKZ with that block size instead (stronger

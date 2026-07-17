@@ -94,7 +94,12 @@ enum class RecoveryMethod {
     // they share k). Not a statistical bias -- a nonce *collision* -- so it
     // bypasses the lattice entirely. New values go at the end: Telemetry casts
     // this enum to int, so appending keeps existing on-the-wire values stable.
-    REPEATED_NONCE
+    REPEATED_NONCE,
+    // Phase 6c: Extended-HNP recovery for modulo / windowed-zero bias
+    // (k mod omega in [0, bound)). Uses the two-block lattice, not the
+    // single-block Boneh-Venkatesan basis. Appended for the same wire-stability
+    // reason as REPEATED_NONCE above.
+    MODULO
 };
 
 // Telemetry state for live dashboard (thread-safe)

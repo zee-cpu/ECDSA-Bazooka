@@ -14,7 +14,14 @@ public:
         RecoveryMethod force_method = RecoveryMethod::AUTO,
         size_t max_sigs = 0,
         double max_time_sec = 0.0,
-        uint64_t sampling_seed = DEFAULT_SAMPLING_SEED
+        uint64_t sampling_seed = DEFAULT_SAMPLING_SEED,
+        // Phase 6c: optional modulo/EHNP hint (k mod omega in [0, bound)). When
+        // both are > 0 the leak structure is *supplied* -- like the known-LSB
+        // hint -- and recovery routes straight to the Extended-HNP lattice,
+        // skipping statistical detection. Both 0 (the default) leaves behaviour
+        // identical to before.
+        const mpz& modulo_omega = mpz(0),
+        const mpz& modulo_bound = mpz(0)
     );
 
 private:
@@ -30,6 +37,15 @@ private:
     // result for the caller's own verification to gate). std::nullopt if no
     // usable collision exists.
     std::optional<mpz> try_repeated_nonce(const std::vector<Signature>& signatures, const mpz& pubkey_hint);
+
+    // Phase 6c: Extended-HNP recovery for modulo / windowed-zero bias
+    // (k mod omega in [0, bound)). When omega/bound are supplied (hint path) it
+    // solves that one instance; otherwise it sweeps a small set of common
+    // (omega, bound) candidates and returns the first that yields a
+    // pubkey-verified key. std::nullopt if none recover. Pubkey-gated, so a
+    // wrong candidate never produces a wrong key.
+    std::optional<mpz> try_modulo(const std::vector<Pair>& pairs, const mpz& modulo_omega,
+                                  const mpz& modulo_bound, size_t max_sigs, const mpz& pubkey_hint);
 
     bool dispatch_and_recover(
         const BiasProfile& profile,

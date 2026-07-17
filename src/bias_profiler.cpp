@@ -351,9 +351,14 @@ std::pair<double, double> BiasProfiler::detect_lsb_bias(const std::vector<Pair>&
 
 std::tuple<double, mpz, mpz, double> BiasProfiler::detect_modulo_bias(
         [[maybe_unused]] const std::vector<Pair>& pairs) {
-    // Stub: modulo / Extended-HNP bias is not implemented (see README). The
-    // `pairs` parameter is intentionally kept for the eventual real signature
-    // and marked maybe_unused so the project-wide strict warnings stay clean.
+    // Phase 6c note: modulo / Extended-HNP bias IS now recovered -- but not from
+    // here. Because "statistically detectable" does not imply "cryptographically
+    // exploitable" for a windowed-zero nonce, the only honest confirmation is an
+    // actual pubkey-verified recovery, which needs the public key (this profiler
+    // has only the (w,x) pairs). So detection+recovery live together in
+    // RecoveryEngine::try_modulo / LatticeSolver::recover_modulo, driven either
+    // by a supplied (omega,bound) hint or `-m modulo`'s bounded sweep. This
+    // profiler hook is intentionally left inert; it is not on the modulo path.
     return {0.0, mpz(0), mpz(0), 0.0};
 }
 

@@ -134,12 +134,17 @@ python3 scripts/generate_mock_signatures.py \
     --count 3000 --bias lsb --bias-bits 8 \
     --output data/lsb_8b_3k.txt --seed 777
 
-# MODULO bias -- generator only; recovery is NOT implemented
-# (detect_modulo_bias is a stub). The tool will report failure on this
-# input. Kept as a negative fixture, not a supported recovery benchmark.
+# MODULO / Extended-HNP bias (Phase 6c) -- windowed zeros: k mod omega in
+# [0, bound). omega = 2^a, bound = 2^(a - bias_bits), so bias_bits is the width
+# of the zero window in the MIDDLE of the nonce (neither MSB nor LSB). The
+# generator prints the (omega, bound) recovery hint. A 12-bit window recovers
+# under LLL in ~15s; a narrow ~8-bit window is heavy-BKZ best-effort (like MSB
+# L=4), so use a comfortable window for a reliable run.
 python3 scripts/generate_mock_signatures.py \
-    --count 50000 --bias modulo --bias-bits 8 \
-    --output data/modulo_8b_50k.txt --seed 2026
+    --count 250 --bias modulo --bias-bits 12 --omega 65536 \
+    --output data/modulo_12b.txt --seed 41
+# ... then recover with the printed hint:
+#   ./ecdsa_nonce_recovery -i data/modulo_12b.txt --modulo-omega 65536 --modulo-bound 16 -q
 
 # No bias (should fail to recover)
 python3 scripts/generate_mock_signatures.py \
@@ -210,6 +215,25 @@ The dashboard updates every ~120ms and shows:
 # Force fallback ladder (wider lattice sweep for weak/undetected bias)
 ./ecdsa_nonce_recovery -i ../data/nobias_1k.txt -m fallback -v
 ```
+
+### Modulo / Extended-HNP recovery (Phase 6c)
+
+For windowed-zero nonces (`k mod ω ∈ [0, bound)` — a zero window in the *middle*
+of the nonce, neither MSB nor LSB), supply the `(ω, bound)` the generator prints
+and recovery routes to the two-block EHNP lattice:
+
+```bash
+# Deterministic hint path (recommended): solve exactly the supplied window
+./ecdsa_nonce_recovery -i ../data/modulo_12b.txt \
+    --modulo-omega 65536 --modulo-bound 16 -v
+
+# Blind sweep over common windows when ω is unknown (opt-in; each wrong guess
+# costs a full lattice reduction, so it is NOT run from plain `auto`)
+./ecdsa_nonce_recovery -i ../data/modulo_12b.txt -m modulo -v
+```
+
+Every candidate is verified against the PubKey, so a wrong `(ω, bound)` guess
+simply fails to recover — it never yields an incorrect key.
 
 ### Limit resources
 
@@ -291,13 +315,15 @@ cd build && make -j$(nproc)
 | Flag                  | Meaning                              | Default   |
 |-----------------------|--------------------------------------|-----------|
 | `-i FILE` / `--input` | Signature file (required)            | —         |
-| `-m METHOD`           | `auto \| lattice \| fallback`        | `auto`    |
+| `-m METHOD`           | `auto \| lattice \| fallback \| modulo` | `auto`    |
 | `-s N`                | Max signatures to use                | all       |
 | `-t SEC`              | Max time budget                      | unlimited |
 | `-v`                  | Live telemetry dashboard             | on        |
 | `-q`                  | Quiet (no live updates)              | off       |
 | `--allow-no-pubkey`   | Best-effort recovery w/o PubKey (unverifiable) | off |
 | `--seed N`            | Sampling RNG seed (hex or decimal), for reproducibility | fixed |
+| `--modulo-omega N`    | Modulo/EHNP hint: period ω (k mod ω in [0, bound)) | — |
+| `--modulo-bound N`    | Modulo/EHNP hint: residue bound (use with `--modulo-omega`) | — |
 | `-h`                  | Help                                 | —         |
 
 ## 11. Expected Behavior per Bias Level
@@ -308,7 +334,8 @@ cd build && make -j$(nproc)
 | MSB/LSB   | 5–6         | ~1000–2000 | Lattice (BKZ b=30) | Tens of sec to ~2 min |
 | MSB/LSB   | 4           | ~2000      | Lattice (BKZ b=30) | Best-effort, few min, not guaranteed for every key |
 | MSB/LSB   | ≤ 3         | —          | —                | Out of reach in practice (see README feasibility notes) |
-| MODULO    | any         | —          | —                | Not implemented (`detect_modulo_bias` is a stub) |
+| MODULO (window ≥ ~12) | window bits | 250–500 | MODULO (Extended-HNP) | k mod ω in [0,bound); needs `--modulo-omega/--modulo-bound` hint or `-m modulo`; LLL, ~15s |
+| MODULO (window ~8) | window bits | 500+ | MODULO (Extended-HNP) | Best-effort, heavy BKZ, minutes, not guaranteed (like MSB L=4) |
 | none      | 0           | any        | Reports failure  | No false positives |
 
 ## 12. Troubleshooting

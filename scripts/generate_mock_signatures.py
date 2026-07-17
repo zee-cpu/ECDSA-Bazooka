@@ -14,7 +14,7 @@ Usage:
 Bias modes:
   msb     : top N bits biased toward 0 (k < 2^(256 - bias_bits))
   lsb     : bottom N bits fixed to 0 (k % 2**bias_bits == 0)
-  modulo  : k mod Omega in [0, bound)   (Omega = 2**bias_bits typically)
+  modulo  : k mod Omega in [0, bound)   (Omega=2^a, bound=2^(a-bias_bits); windowed zeros)
   none    : full uniform random k
 
 Prints ground-truth d at end for verification.
@@ -82,28 +82,36 @@ def compute_k_biased(bias_mode: str, bias_bits: int, omega: Optional[int] = None
         return k % N or step
 
     if bias_mode == "modulo":
-        # k mod Omega is in [0, bound)
-        # bias_bits typically gives Omega = 2**bias_bits or similar
+        # Canonical Extended-HNP (windowed-zero) fixture: the nonce's residue
+        # modulo omega is confined to a small interval, k mod omega in [0, bound).
+        # With omega = 2^a and bound = 2^c (c < a), this zeroes the (a-c)-bit
+        # window [c, a) of k while leaving both the low c bits AND the entire
+        # high part (bits >= a) free -- so it is NOT MSB (k is full-width) and
+        # NOT LSB (the low bits are not fixed). bias_bits is the *leaked* window
+        # width (a - c); the recovery side needs (omega, bound) to solve it.
+        #
+        # The previous version was a heuristic that, for the documented default
+        # (--bias-bits 8, no --omega), collapsed to bound=2 (k mod 256 in {0,1})
+        # -- a near-degenerate LSB case, not a meaningful EHNP instance. This
+        # version is exact and matches the recovery tool's lattice.
         if omega is None:
-            omega = 1 << bias_bits
-        bound = max(1, omega // (1 << max(0, 8)))  # heuristic, e.g. bound ~16 for ~8 bits
-        # but allow override via bias_bits meaning leaked bits
-        # For simplicity, use bound = max(1, 1 << (bias_bits // 2)) or fixed
-        # Project example: period Omega=4096, bound=16 (~8 leaked bits)
-        # Here bias_bits is 'leaked bits' so bound ~ omega / 2**bias_bits
-        if omega is None:
-            omega = 1 << 12   # default 4096 for modulo example
-        bound = max(2, omega >> bias_bits)  # approx leaked
-        if bound >= omega:
-            bound = omega // 2
-        k_mod = random.randint(0, bound - 1)
-        # pick random multiple
-        max_m = (N - 1) // omega
+            omega = 1 << 12          # default period 4096 (a=12)
+        a = omega.bit_length() - 1
+        if (1 << a) != omega:
+            raise ValueError(f"--omega must be a power of two (got {omega})")
+        leaked = bias_bits
+        if not (1 <= leaked < a):
+            raise ValueError(
+                f"modulo: leaked window width (--bias-bits={leaked}) must satisfy "
+                f"1 <= bits < log2(omega)={a}")
+        bound = 1 << (a - leaked)     # c = a - leaked
+        lam = random.randint(0, bound - 1)      # k mod omega, in [0, bound)
+        # high part chosen so k = lam + omega*m stays < N (a modular wrap would
+        # destroy the window property that recovery relies on).
+        max_m = (N - 1 - lam) // omega
         m = random.randint(0, max_m)
-        k = m * omega + k_mod
-        if k == 0:
-            k = k_mod or 1
-        return k % N or 1
+        k = lam + omega * m
+        return k if k >= 1 else (lam or 1)
 
     raise ValueError(f"Unknown bias_mode: {bias_mode}")
 
@@ -184,6 +192,16 @@ def main():
     print(f"[+] Generating {args.count} signatures with bias='{args.bias}' (magnitude ~{args.bias_bits} bits)")
     print(f"[+] Private key (ground truth): {hex(d)}")
     print(f"[+] Output: {args.output}")
+
+    if args.bias == "modulo":
+        # Echo the exact (omega, bound) the recovery side needs as a hint. bound
+        # = omega >> bias_bits (see compute_k_biased); a=log2(omega).
+        _omega = args.omega if args.omega is not None else (1 << 12)
+        _a = _omega.bit_length() - 1
+        _bound = 1 << (_a - args.bias_bits)
+        print(f"[+] MODULO params: omega={_omega} (2^{_a})  bound={_bound} "
+              f"(2^{_a - args.bias_bits})  leaked-window={args.bias_bits} bits")
+        print(f"[+] Recover with: --modulo-omega {_omega} --modulo-bound {_bound}")
 
     # Derive pubkey once for logging
     pub_point = d * G

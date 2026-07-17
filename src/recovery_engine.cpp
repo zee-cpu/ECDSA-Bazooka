@@ -137,6 +137,41 @@ std::optional<mpz> RecoveryEngine::try_repeated_nonce(
     return std::nullopt;
 }
 
+std::optional<mpz> RecoveryEngine::try_modulo(
+    const std::vector<Pair>& pairs, const mpz& modulo_omega,
+    const mpz& modulo_bound, size_t max_sigs, const mpz& pubkey_hint) {
+    tel_.active_method = static_cast<int>(RecoveryMethod::MODULO);
+    tel_.method_chosen = true;
+    tel_.bias_type = static_cast<int>(BiasType::MODULO);
+    tel_.set_phase("Extended-HNP (modulo) recovery");
+
+    // Hint supplied (the side-channel / known-structure model, mirroring the
+    // known-LSB hint): solve that single instance directly.
+    if (modulo_omega > 0 && modulo_bound > 0) {
+        return LatticeSolver::recover_modulo(pairs, modulo_omega, modulo_bound,
+                                             max_sigs, &tel_, pubkey_hint);
+    }
+
+    // No hint: sweep a small set of common power-of-two windows, widest window
+    // first (cheapest and most reliable to resolve). recover_modulo is itself
+    // pubkey-gated, so a wrong (omega,bound) guess reduces a lattice that simply
+    // fails to verify and we move on -- never a wrong key. Deliberately NOT run
+    // from plain AUTO: each wrong rung costs a full reduction, so the blind
+    // sweep is opt-in via `-m modulo` rather than taxing every recovery.
+    struct Cand { int a, c; };  // omega = 2^a, bound = 2^c, window = a-c
+    static const std::vector<Cand> cands = {{20, 4}, {16, 4}, {24, 8}, {12, 4}};
+    for (const auto& cd : cands) {
+        if (tel_.deadline_exceeded()) break;
+        mpz omega = mpz(1) << cd.a;
+        mpz bound = mpz(1) << cd.c;
+        tel_.set_status("modulo sweep: omega=2^" + std::to_string(cd.a) +
+                        " bound=2^" + std::to_string(cd.c));
+        auto d = LatticeSolver::recover_modulo(pairs, omega, bound, max_sigs, &tel_, pubkey_hint);
+        if (d.has_value()) return d;
+    }
+    return std::nullopt;
+}
+
 bool RecoveryEngine::dispatch_and_recover(
     const BiasProfile& profile,
     const std::vector<Pair>& pairs,
@@ -198,7 +233,9 @@ RecoveryResult RecoveryEngine::run(
     RecoveryMethod force_method,
     size_t max_sigs,
     double max_time_sec,
-    uint64_t sampling_seed
+    uint64_t sampling_seed,
+    const mpz& modulo_omega,
+    const mpz& modulo_bound
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -232,6 +269,31 @@ RecoveryResult RecoveryEngine::run(
         result.signatures_used = signatures.size();
         result.bias_profile.description =
             "Reused nonce (r-collision) -- recovered by closed-form algebra, no lattice";
+    } else if (force_method == RecoveryMethod::MODULO ||
+               (modulo_omega > 0 && modulo_bound > 0)) {
+        // Phase 6c: modulo / Extended-HNP. Either the (omega,bound) is supplied
+        // as a hint (route straight to the EHNP lattice, skipping statistical
+        // detection, exactly as the known-LSB path does) or `-m modulo` forces a
+        // blind sweep over common windows. Not reachable from plain AUTO -- see
+        // try_modulo for why the blind sweep is opt-in.
+        auto d = try_modulo(pairs, modulo_omega, modulo_bound, max_sigs, pubkey_hint);
+        if (d.has_value()) {
+            result.private_key = *d;
+            result.private_key_hex = utils::mpz_to_hex(*d);
+            result.method_used = RecoveryMethod::MODULO;
+            result.signatures_used = pairs.size();
+            result.bias_profile.type = BiasType::MODULO;
+            result.bias_profile.modulo_omega = modulo_omega;
+            result.bias_profile.modulo_bound = modulo_bound;
+            result.bias_profile.bias_detected = true;
+            result.bias_profile.description =
+                "modulo / Extended-HNP: k mod omega in [0, bound)";
+        } else {
+            result.success = false;
+            result.verification_details = "No candidate produced (modulo/EHNP)";
+            tel_.recovery_complete = true;
+            return result;
+        }
     } else {
         BiasProfile profile;
         int known_bits = uniform_known_low_bits(signatures);
