@@ -83,6 +83,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     Signature sig;
     bool r_seen = false, s_seen = false, z_seen = false, pk_seen = false;
     bool r_ok = false, s_ok = false, z_ok = false, pk_ok = false;
+    bool timestamp_seen = false, timestamp_ok = false;
     std::istringstream iss(block_text);
     std::string line;
 
@@ -126,9 +127,19 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
             size_t c = l.find(':');
             if (c != std::string::npos) sig.txid = trim(l.substr(c + 1));
         } else if (l.find("Timestamp") == 0) {
+            timestamp_seen = true;
             size_t c = l.find(':');
             if (c != std::string::npos) {
-                try { sig.timestamp = std::stoll(trim(l.substr(c + 1))); } catch (...) {}
+                try {
+                    std::string value = trim(l.substr(c + 1));
+                    size_t consumed = 0;
+                    int64_t parsed = std::stoll(value, &consumed);
+                    if (consumed == value.size()) {
+                        sig.timestamp = parsed;
+                        sig.timestamp_present = true;
+                        timestamp_ok = true;
+                    }
+                } catch (...) {}
             }
         }
     }
@@ -147,6 +158,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     if (!z_seen) return reject("missing Z field");
     if (!z_ok)   return reject("malformed Z (non-hex or over-length)");
     if (pk_seen && !pk_ok) return reject("malformed PubKey (non-hex or over-length)");
+    if (timestamp_seen && !timestamp_ok) return reject("malformed Timestamp");
 
     sig.valid = validate_signature(sig);
     return sig;

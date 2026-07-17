@@ -540,6 +540,7 @@ void test_linear_nonce() {
         for (size_t i = 0; i < ks.size(); ++i) {
             Signature s = make_sig(d, mpz(5000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
             s.timestamp = static_cast<int64_t>(i + 1);
+            s.timestamp_present = true;
             sigs.push_back(s);
         }
         Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
@@ -556,6 +557,7 @@ void test_linear_nonce() {
         for (size_t i = 0; i < ks.size(); ++i) {
             Signature s = make_sig(d, mpz(6000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
             s.timestamp = static_cast<int64_t>(i + 1);
+            s.timestamp_present = true;
             sigs.push_back(s);
         }
         Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
@@ -575,6 +577,7 @@ void test_linear_nonce() {
         for (size_t i = 0; i < ks.size(); ++i) {
             Signature s = make_sig(d, mpz(7000 + static_cast<long>(i)), ks[i], pubkey, i + 1);
             s.timestamp = static_cast<int64_t>(i * 60 + 100);  // monotone in true order
+            s.timestamp_present = true;
             sigs.push_back(s);
         }
         std::mt19937_64 rr(0x5151);
@@ -586,7 +589,28 @@ void test_linear_nonce() {
               "shuffled LCG set recovers via the timestamp-ordered retry");
     }
 
-    // (4) No false positive: random (non-LCG) nonces yield NO linear structure.
+    // (4) Partial timestamp metadata is not a trustworthy ordering key. File
+    // order is deliberately shuffled, so forced LINEAR must fail rather than
+    // treating a partially annotated sequence as fully timestamp-ordered.
+    {
+        auto ks = lcg_seq(mpz("0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"), 9);
+        std::vector<Signature> sigs;
+        for (size_t i = 0; i < ks.size(); ++i) {
+            Signature s = make_sig(d, mpz(7500 + static_cast<long>(i)), ks[i], pubkey, i + 1);
+            s.timestamp = static_cast<int64_t>(i * 60 + 100);
+            s.timestamp_present = (i != 4);
+            sigs.push_back(s);
+        }
+        std::mt19937_64 rr(0x7171);
+        std::shuffle(sigs.begin(), sigs.end(), rr);
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(sigs, pairs, RecoveryMethod::LINEAR);
+        check(!res.success,
+              "partial timestamps do not trigger the LCG ordering fallback");
+    }
+
+    // (5) No false positive: random (non-LCG) nonces yield NO linear structure.
     // Force -m linear so the assertion targets exactly the LCG pre-scan (which
     // fails and reports honestly) rather than paying for the fallback lattice's
     // exhaustive candidate search on unrecoverable data.
@@ -602,6 +626,7 @@ void test_linear_nonce() {
             generated_ks.push_back(k);
             Signature s = make_sig(d, mpz(8000 + static_cast<long>(i)), k, pubkey, i + 1);
             s.timestamp = static_cast<int64_t>(i + 1);
+            s.timestamp_present = true;
             sigs.push_back(s);
         }
         auto sorted_ks = generated_ks;
@@ -716,6 +741,14 @@ void test_input_validation_and_grouping() {
     // Well-formed block accepted.
     auto ok = SignatureParser::parse_block(block("1", "2", "abc", pk_hex));
     check(ok.has_value() && ok->valid, "well-formed signature block is accepted");
+    check(ok.has_value() && ok->timestamp == 0 && !ok->timestamp_present,
+          "missing optional Timestamp has deterministic absent state");
+
+    auto bad_timestamp = SignatureParser::parse_block(
+        block("1", "2", "abc", pk_hex) + "Timestamp: nope\n");
+    check(bad_timestamp.has_value() && !bad_timestamp->valid &&
+              has(bad_timestamp->reject_reason, "malformed Timestamp"),
+          "malformed supplied Timestamp is rejected");
 
     // r = 0 and r >= n rejected with an actionable reason.
     auto r0 = SignatureParser::parse_block(block("0", "2", "abc", pk_hex));

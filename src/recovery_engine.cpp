@@ -219,13 +219,14 @@ std::optional<mpz> RecoveryEngine::try_linear_nonce(
     // carrying each signature's timestamp so the ordering fallback below can
     // reorder by it. (We can't reuse the Pair vector alone -- it doesn't carry
     // the timestamp, which is exactly the field 6d finally puts to use.)
-    struct WX { mpz w, x; int64_t ts; };
+    struct WX { mpz w, x; int64_t ts; bool timestamp_present; };
     std::vector<WX> seq;
     for (const auto& s : signatures) {
         if (!s.valid) continue;
         mpz sinv = utils::mod_inverse(s.s, n);
         if (sinv == 0) continue;
-        seq.push_back({ utils::mod_mul(s.z, sinv, n), utils::mod_mul(s.r, sinv, n), s.timestamp });
+        seq.push_back({ utils::mod_mul(s.z, sinv, n), utils::mod_mul(s.r, sinv, n),
+                        s.timestamp, s.timestamp_present });
     }
     if (seq.size() < (lcg_a > 0 ? static_cast<size_t>(2) : static_cast<size_t>(6)))
         return std::nullopt;
@@ -297,11 +298,15 @@ std::optional<mpz> RecoveryEngine::try_linear_nonce(
 
     // Ordering fallback: the LCG advances in nonce-generation order, which the
     // file order may not preserve but the timestamp usually does. Retry on the
-    // timestamp-sorted sequence -- but only if timestamps are actually present
-    // and not all identical (else it is the same order we just tried).
-    bool have_ts = false;
-    for (size_t i = 1; i < seq.size(); ++i) if (seq[i].ts != seq[0].ts) { have_ts = true; break; }
-    if (have_ts) {
+    // timestamp-sorted sequence -- but only if every participating record has a
+    // timestamp and they are not all identical. Partial timestamp metadata is
+    // not a trustworthy ordering key: sorting missing entries as zero could
+    // manufacture an order the input never asserted.
+    bool all_have_ts = std::all_of(seq.begin(), seq.end(),
+        [](const WX& item) { return item.timestamp_present; });
+    bool timestamps_vary = all_have_ts && std::any_of(seq.begin() + 1, seq.end(),
+        [&](const WX& item) { return item.ts != seq.front().ts; });
+    if (timestamps_vary) {
         std::vector<WX> byts = seq;
         std::stable_sort(byts.begin(), byts.end(),
                          [](const WX& x, const WX& y) { return x.ts < y.ts; });

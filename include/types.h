@@ -26,7 +26,8 @@ struct Signature {
     mpz z;
     mpz pubkey;        // uncompressed SEC1 integer (04 || x || y)
     std::string txid;
-    int64_t timestamp;
+    int64_t timestamp = 0;
+    bool timestamp_present = false;
     bool valid = false;
     // Provenance + diagnostics (Phase 2 input-integrity boundary): the
     // 1-based position of this block in the source file, and, when invalid,
