@@ -32,7 +32,8 @@ static void print_usage(const char* prog) {
     std::cout << "      --lcg-a N          Linear-nonce hint: LCG multiplier a (k_{i+1}=a*k_i+b mod n)\n";
     std::cout << "      --lcg-b N          Linear-nonce hint: LCG increment b (default 0; use with --lcg-a)\n";
     std::cout << "      --leaked-bits N    MSB leakage width for the sieve route (k < 2^(256-N)); needed\n";
-    std::cout << "                         when N is too small (<=3) for statistical detection. Requires a pubkey.\n";
+    std::cout << "                         when N is too small (<=3) for statistical detection. May be\n";
+    std::cout << "                         fractional (e.g. 2.5 -> mixed per-signature bounds). Requires a pubkey.\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -104,7 +105,7 @@ int main(int argc, char** argv) {
     mpz modulo_bound = 0;
     mpz lcg_a = 0;          // Phase 6d hint
     mpz lcg_b = 0;
-    int msb_leaked_bits = 0; // sieve hint: supplied MSB-zero leakage width
+    double msb_leaked_bits = 0.0; // sieve hint: supplied MSB-zero leakage width (may be fractional)
     bool modulo_omega_supplied = false;
     bool modulo_bound_supplied = false;
     bool lcg_a_supplied = false;
@@ -200,9 +201,10 @@ int main(int argc, char** argv) {
                 lcg_b_supplied = true;
                 break;
             case OPT_LEAKED_BITS:
-                msb_leaked_bits = std::atoi(optarg);
-                if (msb_leaked_bits < 1 || msb_leaked_bits > 32) {
-                    std::cerr << "Error: --leaked-bits must be in [1, 32]\n"; return 1;
+                msb_leaked_bits = std::strtod(optarg, nullptr);
+                if (!(msb_leaked_bits >= 1.0 && msb_leaked_bits <= 32.0)) {
+                    std::cerr << "Error: --leaked-bits must be in [1, 32] (fractional allowed, e.g. 2.5)\n";
+                    return 1;
                 }
                 break;
             case 'h':

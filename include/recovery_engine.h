@@ -33,8 +33,10 @@ public:
         // the leak is *supplied* (side-channel model), not statistically detected
         // -- essential for deep leaks (L<=3) where too-few-samples detection fails.
         // Builds an MSB profile directly and, with a pubkey present, routes to the
-        // sieving-with-predicate worker. 0 (default) leaves behaviour unchanged.
-        int msb_leaked_bits = 0
+        // sieving-with-predicate worker. May be fractional (e.g. 2.5 -> a per-
+        // signature mix of the two bracketing bounds). 0 (default) leaves
+        // behaviour unchanged.
+        double msb_leaked_bits = 0.0
     );
 
 private:

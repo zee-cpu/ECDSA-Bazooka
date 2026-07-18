@@ -322,6 +322,27 @@ std::optional<mpz> RecoveryEngine::try_linear_nonce(
     return std::nullopt;
 }
 
+namespace {
+    // Per-signature nonce bit lengths whose average is `klen`. Integer klen ->
+    // uniform; fractional -> a mix of floor and ceil so the mean matches (the
+    // make_klen_list distribution from the A&H estimator). NOTE: with only an
+    // average supplied, the floor/ceil split is assigned positionally -- each
+    // assigned length must be a true upper bound on that signature's nonce, so
+    // fractional L is exact only when per-signature leakage is actually known
+    // (or generated to match). Integer L is uniform and always exact.
+    std::vector<int> make_klen_list(double klen, size_t m) {
+        double fl = std::floor(klen);
+        if (klen == fl) return std::vector<int>(m, static_cast<int>(fl));
+        int lo = static_cast<int>(fl), hi = lo + 1;
+        long nz = std::lround((static_cast<double>(hi) - klen) * static_cast<double>(m));
+        if (nz < 0) nz = 0;
+        if (static_cast<size_t>(nz) > m) nz = static_cast<long>(m);
+        std::vector<int> out(static_cast<size_t>(nz), lo);
+        out.insert(out.end(), m - static_cast<size_t>(nz), hi);
+        return out;
+    }
+} // namespace
+
 std::optional<mpz> RecoveryEngine::try_sieve(
     const std::vector<Signature>& signatures,
     const BiasProfile& profile,
@@ -339,14 +360,30 @@ std::optional<mpz> RecoveryEngine::try_sieve(
         return std::nullopt;
     }
 
-    // Leakage level -> nonce bit length and the sample count the sieve needs.
-    int leaked = static_cast<int>(std::lround(profile.estimated_leaked_bits));
-    if (leaked < 1) leaked = 1;
-    int klen = 256 - leaked;
+    // Leakage level -> nonce bit length (may be fractional) and the sample count
+    // the sieve needs.
+    double leaked = profile.estimated_leaked_bits;
+    if (leaked < 1.0) leaked = 1.0;
+    double klen_avg = 256.0 - leaked;
     // Applicability threshold grows ~ n/L; give a small margin. (Estimator:
-    // L=2 needs m~130, L=3 ~88, L=5 ~52.)
+    // L=2 needs m~130, L=2.5 ~105, L=3 ~88, L=5 ~52.)
     size_t target_m = static_cast<size_t>(std::ceil(258.0 / leaked)) + 4;
     if (max_sigs > 0 && target_m > max_sigs) target_m = max_sigs;
+
+    // Collect the valid signatures we'll hand to the sieve.
+    std::vector<const Signature*> use;
+    for (const auto& s : signatures) {
+        if (!s.valid) continue;
+        use.push_back(&s);
+        if (use.size() >= target_m) break;
+    }
+    if (use.size() < 2) {
+        tel_.set_error("Sieve route: too few valid signatures");
+        return std::nullopt;
+    }
+
+    // Per-signature nonce bit lengths (uniform for integer L, mixed for fractional).
+    std::vector<int> klen_list = make_klen_list(klen_avg, use.size());
 
     // Uncompressed pubkey mpz -> affine point -> x||y (64 hex each) for the worker.
     auto pt = secp256k1::pubkey_to_point(pubkey_hint);
@@ -361,26 +398,18 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     };
     std::string pubkey_hex = hex64(pt->x) + hex64(pt->y);
 
-    // Build the JSON problem spec from valid signatures.
+    // Build the JSON problem spec.
     std::ostringstream js;
     js << "{\"pubkey\":\"" << pubkey_hex << "\",\"solver\":\"sieve_pred\",\"signatures\":[";
-    size_t used = 0;
-    for (const auto& s : signatures) {
-        if (!s.valid) continue;
-        if (used >= target_m) break;
-        if (used) js << ",";
-        js << "[" << klen
+    for (size_t i = 0; i < use.size(); ++i) {
+        const Signature& s = *use[i];
+        if (i) js << ",";
+        js << "[" << klen_list[i]
            << ",\"" << s.z.get_str(16) << "\""
            << ",\"" << s.r.get_str(16) << "\""
            << ",\"" << s.s.get_str(16) << "\"]";
-        used++;
     }
     js << "]}";
-
-    if (used < 2) {
-        tel_.set_error("Sieve route: too few valid signatures");
-        return std::nullopt;
-    }
 
     // Worker location + interpreter from environment (the worker is the external
     // GPL g6k component; keep its path out of the binary).
@@ -518,7 +547,7 @@ RecoveryResult RecoveryEngine::run(
     const mpz& modulo_bound,
     const mpz& lcg_a,
     const mpz& lcg_b,
-    int msb_leaked_bits
+    double msb_leaked_bits
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -612,18 +641,18 @@ RecoveryResult RecoveryEngine::run(
     } else {
         BiasProfile profile;
         int known_bits = uniform_known_low_bits(signatures);
-        if (msb_leaked_bits > 0) {
+        if (msb_leaked_bits > 0.0) {
             // Sieve hint: the MSB-zero leakage width is *supplied* (side-channel
             // model), not detected. Build the MSB profile directly so the deep-leak
             // sieve route has the exact L it needs -- statistical detection fails at
-            // L<=3 with the small sample counts the sieve uses.
+            // L<=3 with the small sample counts the sieve uses. May be fractional.
             profile.type = BiasType::MSB;
-            profile.estimated_leaked_bits = static_cast<double>(msb_leaked_bits);
+            profile.estimated_leaked_bits = msb_leaked_bits;
             profile.bias_detected = true;
             profile.description = "MSB leak (supplied): " +
                 std::to_string(msb_leaked_bits) + " leaked high bit(s)";
             tel_.set_phase("Supplied-MSB recovery");
-            tel_.leaked_bits_est = static_cast<double>(msb_leaked_bits);
+            tel_.leaked_bits_est = msb_leaked_bits;
             tel_.bias_type = static_cast<int>(BiasType::MSB);
         } else if (known_bits > 0) {
             // Phase 6b: the leak is *supplied*, not detected. Build the profile
