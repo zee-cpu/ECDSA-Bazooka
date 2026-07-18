@@ -9,6 +9,23 @@ It is a **separate process** on purpose: G6K/fpylll are GPL-2.0 (hence this
 project is GPL-2.0), keep global state that wants process isolation, and cannot
 be interrupted mid-call, so the parent enforces timeouts by killing the child.
 
+## Quick setup
+
+One command does the whole Tier-2 setup (find/build a G6K Python, clone
+bdd-predicate, install deps, build the shim, write the env file, self-check):
+
+```bash
+worker/bootstrap.sh                 # uses a G6K Python already on PATH
+# or, if you don't have G6K yet (slow, builds from source):
+worker/bootstrap.sh --build-g6k --max-sieving-dim 192   # 192 needed for L=2
+
+source worker/sieve-env.sh          # exports the env vars below
+./build/ecdsa_nonce_recovery -i data/leak.txt --method sieve --leaked-bits 2
+```
+
+The manual steps are documented in the rest of this file; the bootstrap just
+chains them.
+
 ## Layout
 
 | File | Role |

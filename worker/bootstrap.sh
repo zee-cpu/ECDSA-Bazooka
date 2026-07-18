@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#
+# One-shot setup for the sieving-with-predicate route (deep MSB leakage, L<=3).
+# Automates everything Tier-2 needs, then writes worker/sieve-env.sh to source.
+#
+# What it does:
+#   1. Find a Python with G6K + fpylll importable (or build G6K if asked).
+#   2. Clone the upstream bdd-predicate into third_party/ (only usvp.py is used).
+#   3. Install cffi + ecdsa into that Python.
+#   4. Build the predicate shim (CMake target, or worker/build_shim.sh fallback).
+#   5. Write worker/sieve-env.sh with the env vars the C++ tool needs.
+#   6. Verify the whole chain imports and the shim loads.
+#
+# Usage:
+#   worker/bootstrap.sh [--python PATH] [--build-g6k] [--max-sieving-dim N]
+#                       [--jobs N] [--skip-shim]
+#
+# The common case is fully automatic: if a G6K-enabled Python is already on PATH
+# (or in $BAZOOKA_SIEVE_PYTHON) it is detected and used. Building G6K from source
+# (--build-g6k) is heavy and needs a C/C++ toolchain, autotools and libtool.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+THIRD_PARTY="$REPO/third_party"
+BDD_DIR="$THIRD_PARTY/bdd-predicate"
+G6K_DIR="$THIRD_PARTY/g6k"
+
+PY_ARG=""
+BUILD_G6K=0
+MAX_SIEVING_DIM=""
+JOBS="$(nproc 2>/dev/null || echo 4)"
+SKIP_SHIM=0
+
+log()  { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[bootstrap] WARN:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[bootstrap] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --python)           PY_ARG="$2"; shift 2 ;;
+        --build-g6k)        BUILD_G6K=1; shift ;;
+        --max-sieving-dim)  MAX_SIEVING_DIM="$2"; BUILD_G6K=1; shift 2 ;;
+        --jobs)             JOBS="$2"; shift 2 ;;
+        --skip-shim)        SKIP_SHIM=1; shift ;;
+        -h|--help)          grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)                  die "unknown argument: $1" ;;
+    esac
+done
+
+has_g6k() { "$1" -c "import g6k, fpylll" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# 1. Locate a Python with G6K.
+# ---------------------------------------------------------------------------
+PYTHON=""
+for cand in "$PY_ARG" "${BAZOOKA_SIEVE_PYTHON:-}" \
+            "$G6K_DIR/g6k-env/bin/python" python3 python; do
+    [ -n "$cand" ] || continue
+    if command -v "$cand" >/dev/null 2>&1 && has_g6k "$cand"; then
+        PYTHON="$(command -v "$cand")"
+        log "found G6K in: $PYTHON"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    if [ "$BUILD_G6K" -eq 1 ]; then
+        log "no G6K Python found -- building G6K from source (this is slow)..."
+        mkdir -p "$THIRD_PARTY"
+        if [ ! -d "$G6K_DIR/.git" ]; then
+            git clone --depth 1 https://github.com/fplll/g6k "$G6K_DIR"
+        fi
+        pushd "$G6K_DIR" >/dev/null
+        if [ -n "$MAX_SIEVING_DIM" ]; then
+            # g6k bootstrap honours a configure flag for the sieving-dim cap.
+            export CONFIGURE_FLAGS="--with-max-sieving-dim=$MAX_SIEVING_DIM"
+            log "building G6K with MAX_SIEVING_DIM=$MAX_SIEVING_DIM"
+        fi
+        ./bootstrap.sh -j "$JOBS" || die "G6K build failed -- see G6K's README for system deps (autotools, libtool, a C/C++ toolchain, MPFR)."
+        popd >/dev/null
+        PYTHON="$G6K_DIR/g6k-env/bin/python"
+        has_g6k "$PYTHON" || die "G6K built but not importable from $PYTHON"
+        log "built G6K, using: $PYTHON"
+    else
+        die "no Python with G6K found. Either activate one and set \$BAZOOKA_SIEVE_PYTHON,
+       pass --python /path/to/python, or re-run with --build-g6k (slow, from source).
+       For the L=2 case also pass --max-sieving-dim 192."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2. bdd-predicate (upstream; only usvp.py is used, Sage-free).
+# ---------------------------------------------------------------------------
+if [ -f "$BDD_DIR/usvp.py" ]; then
+    log "bdd-predicate present: $BDD_DIR"
+else
+    log "cloning bdd-predicate into $BDD_DIR"
+    mkdir -p "$THIRD_PARTY"
+    git clone --depth 1 https://github.com/malb/bdd-predicate "$BDD_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Python deps for the worker.
+# ---------------------------------------------------------------------------
+log "installing worker Python deps (cffi, ecdsa) into the G6K Python"
+"$PYTHON" -m pip install --quiet cffi ecdsa || warn "pip install failed; ensure cffi and ecdsa are available in $PYTHON"
+
+# ---------------------------------------------------------------------------
+# 4. Build the predicate shim (libbazooka_predicate.so).
+# ---------------------------------------------------------------------------
+SHIM_SO=""
+if [ "$SKIP_SHIM" -eq 0 ]; then
+    if command -v cmake >/dev/null 2>&1; then
+        log "building predicate shim via CMake target bazooka_predicate"
+        cmake --preset release >/dev/null 2>&1 || cmake -S "$REPO" -B "$REPO/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+        cmake --build "$REPO/build" --target bazooka_predicate -j "$JOBS" >/dev/null
+        SHIM_SO="$REPO/build/libbazooka_predicate.so"
+    fi
+    if [ ! -f "$SHIM_SO" ]; then
+        log "falling back to worker/build_shim.sh"
+        "$REPO/worker/build_shim.sh"
+        SHIM_SO="$REPO/worker/build/libbazooka_predicate.so"
+    fi
+    [ -f "$SHIM_SO" ] || die "shim build produced no libbazooka_predicate.so"
+    log "shim: $SHIM_SO"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Write the env file to source.
+# ---------------------------------------------------------------------------
+ENV_FILE="$REPO/worker/sieve-env.sh"
+{
+    echo "# Generated by worker/bootstrap.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    echo "# Source this before running the sieve route:  source worker/sieve-env.sh"
+    echo "export BAZOOKA_SIEVE_PYTHON=\"$PYTHON\""
+    echo "export BAZOOKA_SIEVE_WORKER=\"$REPO/worker/worker_cli.py\""
+    echo "export BDD_PREDICATE_DIR=\"$BDD_DIR\""
+    [ -n "$SHIM_SO" ] && echo "export BAZOOKA_PREDICATE_SO=\"$SHIM_SO\""
+} > "$ENV_FILE"
+log "wrote $ENV_FILE"
+
+# ---------------------------------------------------------------------------
+# 6. Verify the whole chain.
+# ---------------------------------------------------------------------------
+log "verifying imports..."
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+"$PYTHON" - <<PY || die "verification failed -- see the traceback above"
+import os, sys
+sys.path.insert(0, os.environ["BDD_PREDICATE_DIR"])
+sys.path.insert(0, os.path.join("$REPO", "worker"))
+import g6k, fpylll, usvp            # sieve stack
+import ecdsa, cffi                  # worker deps
+if "$SKIP_SHIM" == "0":
+    import predicate_shim           # loads libbazooka_predicate.so
+print("  OK: g6k, fpylll, usvp, ecdsa, cffi" + (", predicate_shim" if "$SKIP_SHIM"=="0" else ""))
+PY
+
+cat <<EOF
+
+$(printf '\033[1;32m[bootstrap] Sieve route ready.\033[0m')
+
+  source worker/sieve-env.sh
+  ./build/ecdsa_nonce_recovery -i <input> --method sieve --leaked-bits <L>
+
+For the L=2 case, G6K must be built with MAX_SIEVING_DIM >= 192:
+  worker/bootstrap.sh --build-g6k --max-sieving-dim 192
+EOF
