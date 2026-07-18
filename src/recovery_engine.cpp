@@ -3,11 +3,18 @@
 #include "verifier.h"
 #include "bias_profiler.h"
 #include "utils.h"
+#include "secp256k1.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -315,8 +322,128 @@ std::optional<mpz> RecoveryEngine::try_linear_nonce(
     return std::nullopt;
 }
 
+std::optional<mpz> RecoveryEngine::try_sieve(
+    const std::vector<Signature>& signatures,
+    const BiasProfile& profile,
+    size_t max_sigs,
+    const mpz& pubkey_hint
+) {
+    tel_.active_method = static_cast<int>(RecoveryMethod::SIEVE);
+    tel_.method_chosen = true;
+    tel_.set_phase("Sieving-with-predicate (external g6k worker)");
+
+    // Hard requirement: the predicate is the pubkey check. Without a pubkey the
+    // method does not exist -- fail rather than fall through to a heuristic path.
+    if (pubkey_hint <= 1) {
+        tel_.set_error("Sieve route requires a public key (predicate = pubkey check)");
+        return std::nullopt;
+    }
+
+    // Leakage level -> nonce bit length and the sample count the sieve needs.
+    int leaked = static_cast<int>(std::lround(profile.estimated_leaked_bits));
+    if (leaked < 1) leaked = 1;
+    int klen = 256 - leaked;
+    // Applicability threshold grows ~ n/L; give a small margin. (Estimator:
+    // L=2 needs m~130, L=3 ~88, L=5 ~52.)
+    size_t target_m = static_cast<size_t>(std::ceil(258.0 / leaked)) + 4;
+    if (max_sigs > 0 && target_m > max_sigs) target_m = max_sigs;
+
+    // Uncompressed pubkey mpz -> affine point -> x||y (64 hex each) for the worker.
+    auto pt = secp256k1::pubkey_to_point(pubkey_hint);
+    if (!pt.has_value()) {
+        tel_.set_error("Sieve route: unusable public key");
+        return std::nullopt;
+    }
+    auto hex64 = [](const mpz& v) {
+        std::string h = v.get_str(16);
+        if (h.size() < 64) h = std::string(64 - h.size(), '0') + h;
+        return h;
+    };
+    std::string pubkey_hex = hex64(pt->x) + hex64(pt->y);
+
+    // Build the JSON problem spec from valid signatures.
+    std::ostringstream js;
+    js << "{\"pubkey\":\"" << pubkey_hex << "\",\"solver\":\"sieve_pred\",\"signatures\":[";
+    size_t used = 0;
+    for (const auto& s : signatures) {
+        if (!s.valid) continue;
+        if (used >= target_m) break;
+        if (used) js << ",";
+        js << "[" << klen
+           << ",\"" << s.z.get_str(16) << "\""
+           << ",\"" << s.r.get_str(16) << "\""
+           << ",\"" << s.s.get_str(16) << "\"]";
+        used++;
+    }
+    js << "]}";
+
+    if (used < 2) {
+        tel_.set_error("Sieve route: too few valid signatures");
+        return std::nullopt;
+    }
+
+    // Worker location + interpreter from environment (the worker is the external
+    // GPL g6k component; keep its path out of the binary).
+    const char* worker = std::getenv("BAZOOKA_SIEVE_WORKER");
+    if (!worker || !*worker) {
+        tel_.set_error("Sieve worker not configured (set BAZOOKA_SIEVE_WORKER)");
+        return std::nullopt;
+    }
+    const char* python = std::getenv("BAZOOKA_SIEVE_PYTHON");
+    std::string py = (python && *python) ? python : "python3";
+
+    // Hand the spec to the worker on stdin via a temp file, read back the key.
+    // The sieve is a batch operation; --max-time is intentionally not enforced
+    // here (the plan relaxes it for this path). Process-level timeout is a follow-up.
+    char tmpl[] = "/tmp/bazooka_sieve_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        tel_.set_error("Sieve route: could not create temp spec");
+        return std::nullopt;
+    }
+    {
+        FILE* f = fdopen(fd, "w");
+        std::string spec = js.str();
+        std::fwrite(spec.data(), 1, spec.size(), f);
+        std::fclose(f);
+    }
+
+    std::string cmd = py + " " + worker + " < " + tmpl + " 2>/dev/null";
+    std::string out;
+    if (FILE* pipe = popen(cmd.c_str(), "r")) {
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+        pclose(pipe);
+    }
+    unlink(tmpl);
+
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+        out.pop_back();
+
+    if (out.empty() || out == "FAIL") {
+        tel_.set_status("Sieve worker returned no key");
+        return std::nullopt;
+    }
+
+    mpz d;
+    try {
+        d = mpz(out, 16);
+    } catch (...) {
+        tel_.set_error("Sieve worker: unparseable output");
+        return std::nullopt;
+    }
+
+    // Definitive gate: never return an unverified key.
+    if (!utils::verify_pubkey(d, pubkey_hint)) {
+        tel_.set_status("Sieve candidate failed pubkey check");
+        return std::nullopt;
+    }
+    return d;
+}
+
 bool RecoveryEngine::dispatch_and_recover(
     const BiasProfile& profile,
+    const std::vector<Signature>& signatures,
     const std::vector<Pair>& pairs,
     RecoveryMethod force,
     size_t max_sigs,
@@ -328,7 +455,15 @@ bool RecoveryEngine::dispatch_and_recover(
 
     RecoveryMethod chosen = force;
     if (chosen == RecoveryMethod::AUTO) {
-        if (profile.bias_detected && profile.estimated_leaked_bits >= 3.0) {
+        // Deep MSB leakage (L<=3) is past the lattice barrier: plain LLL/BKZ
+        // cannot reach it. Route to the sieving-with-predicate worker instead,
+        // but only when a public key is present -- the predicate IS the pubkey
+        // check, so without one the method does not exist. L>=4 (and any
+        // no-pubkey case) keeps the existing Phase 1/2 behaviour untouched.
+        if (profile.bias_detected && profile.type == BiasType::MSB &&
+            profile.estimated_leaked_bits <= 3.0 && pubkey_hint > 1) {
+            chosen = RecoveryMethod::SIEVE;
+        } else if (profile.bias_detected && profile.estimated_leaked_bits >= 3.0) {
             chosen = RecoveryMethod::LATTICE;
         } else {
             chosen = RecoveryMethod::FALLBACK;
@@ -341,7 +476,9 @@ bool RecoveryEngine::dispatch_and_recover(
         return c.has_value() && pubkey_hint > 0 && utils::verify_pubkey(*c, pubkey_hint);
     };
 
-    if (chosen == RecoveryMethod::LATTICE) {
+    if (chosen == RecoveryMethod::SIEVE) {
+        candidate = try_sieve(signatures, profile, max_sigs, pubkey_hint);
+    } else if (chosen == RecoveryMethod::LATTICE) {
         candidate = try_lattice(pairs, profile, max_sigs, pubkey_hint);
         if (!verified(candidate) && !tel_.deadline_exceeded()) {
             // The profiler's chosen bias shape (MSB vs LSB) is itself a
@@ -380,7 +517,8 @@ RecoveryResult RecoveryEngine::run(
     const mpz& modulo_omega,
     const mpz& modulo_bound,
     const mpz& lcg_a,
-    const mpz& lcg_b
+    const mpz& lcg_b,
+    int msb_leaked_bits
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -474,7 +612,20 @@ RecoveryResult RecoveryEngine::run(
     } else {
         BiasProfile profile;
         int known_bits = uniform_known_low_bits(signatures);
-        if (known_bits > 0) {
+        if (msb_leaked_bits > 0) {
+            // Sieve hint: the MSB-zero leakage width is *supplied* (side-channel
+            // model), not detected. Build the MSB profile directly so the deep-leak
+            // sieve route has the exact L it needs -- statistical detection fails at
+            // L<=3 with the small sample counts the sieve uses.
+            profile.type = BiasType::MSB;
+            profile.estimated_leaked_bits = static_cast<double>(msb_leaked_bits);
+            profile.bias_detected = true;
+            profile.description = "MSB leak (supplied): " +
+                std::to_string(msb_leaked_bits) + " leaked high bit(s)";
+            tel_.set_phase("Supplied-MSB recovery");
+            tel_.leaked_bits_est = static_cast<double>(msb_leaked_bits);
+            tel_.bias_type = static_cast<int>(BiasType::MSB);
+        } else if (known_bits > 0) {
             // Phase 6b: the leak is *supplied*, not detected. Build the profile
             // directly and let the lattice use each pair's known low-bit residue
             // (Pair::known_low_value, folded in by transform_pairs_lsb). This is
@@ -494,7 +645,7 @@ RecoveryResult RecoveryEngine::run(
             profile = BiasProfiler::profile(pairs, &tel_);
         }
 
-        bool dispatch_ok = dispatch_and_recover(profile, pairs, force_method, max_sigs, pubkey_hint, result);
+        bool dispatch_ok = dispatch_and_recover(profile, signatures, pairs, force_method, max_sigs, pubkey_hint, result);
 
         if (!dispatch_ok || !result.private_key) {
             result.success = false;

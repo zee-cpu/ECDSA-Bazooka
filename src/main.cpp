@@ -19,7 +19,7 @@ static void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options] <input.txt>\n\n";
     std::cout << "Options:\n";
     std::cout << "  -i, --input FILE       Input signature file (required)\n";
-    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fallback | modulo | linear (default: auto)\n";
+    std::cout << "  -m, --method METHOD    Force method: auto | lattice | fallback | modulo | linear | sieve (default: auto)\n";
     std::cout << "  -s, --max-sigs N       Maximum signatures to use\n";
     std::cout << "  -t, --max-time SEC     Max time budget (seconds)\n";
     std::cout << "  -v, --verbose          Enable live telemetry dashboard\n";
@@ -31,6 +31,8 @@ static void print_usage(const char* prog) {
     std::cout << "      --modulo-bound N   Modulo/EHNP hint: residue bound (use with --modulo-omega)\n";
     std::cout << "      --lcg-a N          Linear-nonce hint: LCG multiplier a (k_{i+1}=a*k_i+b mod n)\n";
     std::cout << "      --lcg-b N          Linear-nonce hint: LCG increment b (default 0; use with --lcg-a)\n";
+    std::cout << "      --leaked-bits N    MSB leakage width for the sieve route (k < 2^(256-N)); needed\n";
+    std::cout << "                         when N is too small (<=3) for statistical detection. Requires a pubkey.\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -42,6 +44,7 @@ std::optional<RecoveryMethod> parse_method(const std::string& s) {
     if (s == "fallback") return RecoveryMethod::FALLBACK;
     if (s == "modulo") return RecoveryMethod::MODULO;
     if (s == "linear") return RecoveryMethod::LINEAR;
+    if (s == "sieve") return RecoveryMethod::SIEVE;
     if (s == "auto") return RecoveryMethod::AUTO;
     return std::nullopt;
 }
@@ -101,6 +104,7 @@ int main(int argc, char** argv) {
     mpz modulo_bound = 0;
     mpz lcg_a = 0;          // Phase 6d hint
     mpz lcg_b = 0;
+    int msb_leaked_bits = 0; // sieve hint: supplied MSB-zero leakage width
     bool modulo_omega_supplied = false;
     bool modulo_bound_supplied = false;
     bool lcg_a_supplied = false;
@@ -108,7 +112,7 @@ int main(int argc, char** argv) {
 
     enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001,
            OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003,
-           OPT_LCG_A = 1004, OPT_LCG_B = 1005 };
+           OPT_LCG_A = 1004, OPT_LCG_B = 1005, OPT_LEAKED_BITS = 1006 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -122,6 +126,7 @@ int main(int argc, char** argv) {
         {"modulo-bound", required_argument, 0, OPT_MOD_BOUND},
         {"lcg-a", required_argument, 0, OPT_LCG_A},
         {"lcg-b", required_argument, 0, OPT_LCG_B},
+        {"leaked-bits", required_argument, 0, OPT_LEAKED_BITS},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -193,6 +198,12 @@ int main(int argc, char** argv) {
                     std::cerr << "Error: invalid --lcg-b value\n"; return 1;
                 }
                 lcg_b_supplied = true;
+                break;
+            case OPT_LEAKED_BITS:
+                msb_leaked_bits = std::atoi(optarg);
+                if (msb_leaked_bits < 1 || msb_leaked_bits > 32) {
+                    std::cerr << "Error: --leaked-bits must be in [1, 32]\n"; return 1;
+                }
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -300,7 +311,8 @@ int main(int argc, char** argv) {
         modulo_omega,
         modulo_bound,
         lcg_a,
-        lcg_b
+        lcg_b,
+        msb_leaked_bits
     );
 
     // Stop renderer
@@ -341,6 +353,7 @@ int main(int argc, char** argv) {
                 case RecoveryMethod::REPEATED_NONCE: return "REPEATED_NONCE";
                 case RecoveryMethod::MODULO: return "MODULO (Extended-HNP)";
                 case RecoveryMethod::LINEAR: return "LINEAR (LCG nonces)";
+                case RecoveryMethod::SIEVE: return "SIEVE (predicate / g6k worker)";
                 default: return "UNKNOWN";
             }
         };

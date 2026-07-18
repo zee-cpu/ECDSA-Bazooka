@@ -28,7 +28,13 @@ public:
         // default) leaves the unknown-(a,b) closed-form pre-scan to discover the
         // key on its own, or -- absent any LCG structure -- to find nothing.
         const mpz& lcg_a = mpz(0),
-        const mpz& lcg_b = mpz(0)
+        const mpz& lcg_b = mpz(0),
+        // Sieve hint: supplied MSB-zero leakage width L (k < 2^(256-L)). When > 0
+        // the leak is *supplied* (side-channel model), not statistically detected
+        // -- essential for deep leaks (L<=3) where too-few-samples detection fails.
+        // Builds an MSB profile directly and, with a pubkey present, routes to the
+        // sieving-with-predicate worker. 0 (default) leaves behaviour unchanged.
+        int msb_leaked_bits = 0
     );
 
 private:
@@ -71,10 +77,26 @@ private:
 
     bool dispatch_and_recover(
         const BiasProfile& profile,
+        const std::vector<Signature>& signatures,
         const std::vector<Pair>& pairs,
         RecoveryMethod force,
         size_t max_sigs,
         const mpz& pubkey_hint,
         RecoveryResult& result
+    );
+
+    // Sieving-with-predicate route (L<=3 MSB, pubkey required). Serializes the
+    // signatures + compressed pubkey and delegates to the external GPL g6k
+    // worker (worker_cli.py) over a subprocess boundary, reading back the
+    // recovered key. Hard-requires a pubkey (pubkey_hint > 1): the predicate is
+    // the pubkey check, so without one the method does not exist -- it returns
+    // nullopt rather than silently falling through to a heuristic path that
+    // cannot succeed at this leakage level. The worker path and interpreter are
+    // configured via the BAZOOKA_SIEVE_WORKER / BAZOOKA_SIEVE_PYTHON env vars.
+    std::optional<mpz> try_sieve(
+        const std::vector<Signature>& signatures,
+        const BiasProfile& profile,
+        size_t max_sigs,
+        const mpz& pubkey_hint
     );
 };

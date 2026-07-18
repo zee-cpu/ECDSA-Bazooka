@@ -105,7 +105,12 @@ enum class RecoveryMethod {
     // (k_{i+1} = a*k_i + b mod n). Like the repeated-nonce case it is algebra,
     // not a lattice -- a small modular linear system over consecutive
     // signatures. Appended for wire stability.
-    LINEAR
+    LINEAR,
+    // Sieving-with-predicate route for deep MSB leakage (L<=3), which plain
+    // LLL/BKZ cannot reach (the "lattice barrier"). Delegated to an external
+    // GPL g6k worker over a subprocess boundary, gated on a public key being
+    // present (the predicate IS the pubkey check). Appended for wire stability.
+    SIEVE
 };
 
 // Telemetry state for live dashboard (thread-safe)
