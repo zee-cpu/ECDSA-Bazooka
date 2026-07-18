@@ -88,10 +88,10 @@ void ensure_env() {
     if (!path) return;
     auto vars = parse_env_file(*path);
     for (const auto& [k, v] : vars) {
-        if (k == "PYTHONPATH") {
-            const char* cur = std::getenv("PYTHONPATH");
+        if (k == "PYTHONPATH" || k == "LD_LIBRARY_PATH") {
+            const char* cur = std::getenv(k.c_str());
             std::string composed = resolve_pythonpath(v, cur ? cur : "");
-            setenv("PYTHONPATH", composed.c_str(), /*overwrite=*/1);
+            setenv(k.c_str(), composed.c_str(), /*overwrite=*/1);
         } else {
             // do not overwrite anything already explicitly set
             setenv(k.c_str(), v.c_str(), /*overwrite=*/0);
@@ -103,7 +103,7 @@ namespace {
     bool file_exists(const std::string& p) { std::ifstream f(p); return f.good(); }
 }
 
-bool python_has_g6k(const std::string& py, const std::string& pythonpath) {
+bool python_has_g6k(const std::string& py, const std::string& pythonpath, const std::string& ld_library_path) {
     if (py.empty()) return false;
     pid_t pid = fork();
     if (pid < 0) return false;
@@ -111,6 +111,7 @@ bool python_has_g6k(const std::string& py, const std::string& pythonpath) {
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); }
         if (!pythonpath.empty()) setenv("PYTHONPATH", pythonpath.c_str(), 1);
+        if (!ld_library_path.empty()) setenv("LD_LIBRARY_PATH", ld_library_path.c_str(), 1);
         execlp(py.c_str(), py.c_str(), "-c", "import g6k", static_cast<char*>(nullptr));
         _exit(127);  // exec failed
     }
@@ -144,6 +145,7 @@ std::string check_report() {
     std::string py = val("BAZOOKA_SIEVE_PYTHON");
     std::string so = val("BAZOOKA_PREDICATE_SO");
     std::string pp = resolve_pythonpath(val("PYTHONPATH"), "");
+    std::string ld = resolve_pythonpath(val("LD_LIBRARY_PATH"), "");
     std::string bdd = val("BDD_PREDICATE_DIR");
 
     if (worker.empty() || !file_exists(worker))
@@ -152,7 +154,7 @@ std::string check_report() {
         return r + "sieve route   : NOT set up (predicate shim not built)\n                fix: cmake --build --preset release --target bazooka_predicate\n";
     if (!bdd.empty() && !file_exists(bdd + "/usvp.py"))
         return r + "sieve route   : NOT set up (bdd-predicate missing)\n                fix: run worker/bootstrap.sh\n";
-    if (!python_has_g6k(py, pp))
+    if (!python_has_g6k(py, pp, ld))
         return r + "sieve route   : NOT set up (g6k not importable)\n                fix: run worker/bootstrap.sh --build-g6k\n";
     r += "sieve route   : ready\n";
     return r;

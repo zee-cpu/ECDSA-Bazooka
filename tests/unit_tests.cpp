@@ -521,7 +521,7 @@ void test_sieve_config() {
 
     // Security: an injection-shaped python path must NOT be shell-executed.
     std::remove("/tmp/bz_g6k_probe_pwned");
-    (void)sieve_config::python_has_g6k("/no/such/py; touch /tmp/bz_g6k_probe_pwned", "");
+    (void)sieve_config::python_has_g6k("/no/such/py; touch /tmp/bz_g6k_probe_pwned", "", "");
     { std::ifstream pw("/tmp/bz_g6k_probe_pwned");
       check(!pw.good(), "g6k probe does not shell-execute an injected command"); }
 }

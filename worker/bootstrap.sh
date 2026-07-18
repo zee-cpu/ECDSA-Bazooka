@@ -37,6 +37,10 @@ SKIP_SHIM=0
 # A from-source G6K is built in-place and imported via this on PYTHONPATH
 # (that is what G6K's own `source activate` does). Empty for an installed G6K.
 G6K_PYTHONPATH=""
+# A from-source G6K also builds its own libfplll.so.* into g6k-env/lib only;
+# that dir must be on LD_LIBRARY_PATH for `import fpylll` to find it. Empty
+# for an installed G6K.
+G6K_LD_LIBRARY_PATH=""
 
 log()  { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[bootstrap] WARN:\033[0m %s\n' "$*" >&2; }
@@ -56,7 +60,8 @@ while [ $# -gt 0 ]; do
 done
 
 has_g6k() {
-    PYTHONPATH="${G6K_PYTHONPATH:+$G6K_PYTHONPATH:}${PYTHONPATH:-}" \
+    LD_LIBRARY_PATH="${G6K_LD_LIBRARY_PATH:+$G6K_LD_LIBRARY_PATH:}${LD_LIBRARY_PATH:-}" \
+        PYTHONPATH="${G6K_PYTHONPATH:+$G6K_PYTHONPATH:}${PYTHONPATH:-}" \
         "$1" -c "import g6k, fpylll" >/dev/null 2>&1
 }
 
@@ -100,6 +105,7 @@ if [ -z "$PYTHON" ]; then
             git clone --depth 1 https://github.com/fplll/g6k "$G6K_DIR"
         fi
         G6K_PYTHONPATH="$G6K_DIR"           # in-place build -> import via PYTHONPATH
+        G6K_LD_LIBRARY_PATH="$G6K_DIR/g6k-env/lib"  # freshly-built libfplll.so.9 lives here
         PYTHON="$G6K_DIR/g6k-env/bin/python"
         pushd "$G6K_DIR" >/dev/null
         # Full fplll+fpylll+g6k build. Idempotent: skip if g6k-env already imports.
@@ -190,6 +196,7 @@ ENV_FILE="$REPO/worker/sieve-env.sh"
     # worker subprocess the C++ tool spawns).
     [ -n "$G6K_PYTHONPATH" ] && \
         echo "export PYTHONPATH=\"$G6K_PYTHONPATH\${PYTHONPATH:+:\$PYTHONPATH}\""
+    [ -n "$G6K_LD_LIBRARY_PATH" ] && echo "export LD_LIBRARY_PATH=\"$G6K_LD_LIBRARY_PATH\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
 } > "$ENV_FILE"
 log "wrote $ENV_FILE"
 

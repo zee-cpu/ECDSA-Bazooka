@@ -33,10 +33,12 @@ namespace sieve_config {
     // the g6k import probe is best-effort.
     std::string check_report();
 
-    // True iff `py -c "import g6k"` succeeds with `pythonpath` on PYTHONPATH.
-    // Runs the interpreter directly (no shell), so a python path or PYTHONPATH
-    // containing shell metacharacters is treated literally, never executed.
-    // Times out (returns false) if the probe does not finish promptly.
-    bool python_has_g6k(const std::string& py, const std::string& pythonpath);
+    // True iff `py -c "import g6k"` succeeds with `pythonpath` on PYTHONPATH
+    // and `ld_library_path` on LD_LIBRARY_PATH (needed by a from-source g6k's
+    // freshly-built libfplll.so.9). Runs the interpreter directly (no shell),
+    // so a python path or PYTHONPATH/LD_LIBRARY_PATH containing shell
+    // metacharacters is treated literally, never executed. Times out
+    // (returns false) if the probe does not finish promptly.
+    bool python_has_g6k(const std::string& py, const std::string& pythonpath, const std::string& ld_library_path);
 
 } // namespace sieve_config
