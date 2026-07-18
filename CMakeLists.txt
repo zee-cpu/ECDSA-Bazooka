@@ -64,6 +64,16 @@ target_link_libraries(ecdsa_nonce_recovery PRIVATE ecdsa_recovery_core)
 target_compile_options(ecdsa_nonce_recovery PRIVATE ${ECDSA_WARNINGS})
 
 # ---------------------------------------------------------------------------
+# Predicate shim: a shared library exposing the tool's secp256k1 pubkey check
+# (bazooka_predicate) to the external g6k sieve worker via cffi. Links no
+# lattice/sieve code. The static core must be PIC to link into a shared object.
+# ---------------------------------------------------------------------------
+set_property(TARGET ecdsa_recovery_core PROPERTY POSITION_INDEPENDENT_CODE ON)
+add_library(bazooka_predicate SHARED src/predicate_shim.cpp)
+target_link_libraries(bazooka_predicate PRIVATE ecdsa_recovery_core)
+target_compile_options(bazooka_predicate PRIVATE ${ECDSA_WARNINGS})
+
+# ---------------------------------------------------------------------------
 # Standalone fplll sanity test (depends only on fplll/gmp, not the core lib)
 # ---------------------------------------------------------------------------
 add_executable(fplll_sanity_test tests/fplll_sanity.cpp)

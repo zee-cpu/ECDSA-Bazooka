@@ -1,6 +1,16 @@
 build/
 build-*/
 
+# External sieve dependencies (upstream GPL, cloned locally, not vendored):
+# bdd-predicate lives here by default (BDD_PREDICATE_DIR). See worker/README.md.
+third_party/
+
+# Standalone shim build output + Python caches under worker/
+worker/build/
+worker/__pycache__/
+worker/.pytest_cache/
+*.so
+
 # Generated signature fixtures -- regenerable via scripts/generate_mock_signatures.py,
 # not source. Kept out of the repo to stay lean.
 data/*.txt
