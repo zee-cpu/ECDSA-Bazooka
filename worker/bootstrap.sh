@@ -34,6 +34,9 @@ FORCE_BUILD=0
 MAX_SIEVING_DIM=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
 SKIP_SHIM=0
+# A from-source G6K is built in-place and imported via this on PYTHONPATH
+# (that is what G6K's own `source activate` does). Empty for an installed G6K.
+G6K_PYTHONPATH=""
 
 log()  { printf '\033[1;34m[bootstrap]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[bootstrap] WARN:\033[0m %s\n' "$*" >&2; }
@@ -52,7 +55,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-has_g6k() { "$1" -c "import g6k, fpylll" >/dev/null 2>&1; }
+has_g6k() {
+    PYTHONPATH="${G6K_PYTHONPATH:+$G6K_PYTHONPATH:}${PYTHONPATH:-}" \
+        "$1" -c "import g6k, fpylll" >/dev/null 2>&1
+}
 
 # ---------------------------------------------------------------------------
 # 1. Locate a Python with G6K.
@@ -77,7 +83,9 @@ if [ -z "$PYTHON" ]; then
         # Fail early (before the long clone/build) if the autotools toolchain
         # G6K's fplll build needs is incomplete.
         missing=""
-        for tool in git make autoconf automake libtool g++ pkg-config; do
+        # autotools bootstrap needs libtoolize (from the 'libtool' package), not
+        # the standalone /usr/bin/libtool binary (which is 'libtool-bin').
+        for tool in git make autoconf automake libtoolize g++ pkg-config; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
         done
         [ -f /usr/include/mpfr.h ] || missing="$missing libmpfr-dev(mpfr.h)"
@@ -87,22 +95,42 @@ if [ -z "$PYTHON" ]; then
          sudo apt-get install -y git build-essential autoconf automake libtool pkg-config libmpfr-dev libgmp-dev
        then re-run this script."
         fi
-        log "no G6K Python found -- building G6K from source (this is slow)..."
         mkdir -p "$THIRD_PARTY"
         if [ ! -d "$G6K_DIR/.git" ]; then
             git clone --depth 1 https://github.com/fplll/g6k "$G6K_DIR"
         fi
-        pushd "$G6K_DIR" >/dev/null
-        if [ -n "$MAX_SIEVING_DIM" ]; then
-            # g6k bootstrap honours a configure flag for the sieving-dim cap.
-            export CONFIGURE_FLAGS="--with-max-sieving-dim=$MAX_SIEVING_DIM"
-            log "building G6K with MAX_SIEVING_DIM=$MAX_SIEVING_DIM"
-        fi
-        ./bootstrap.sh -j "$JOBS" || die "G6K build failed -- see G6K's README for system deps (autotools, libtool, a C/C++ toolchain, MPFR)."
-        popd >/dev/null
+        G6K_PYTHONPATH="$G6K_DIR"           # in-place build -> import via PYTHONPATH
         PYTHON="$G6K_DIR/g6k-env/bin/python"
-        has_g6k "$PYTHON" || die "G6K built but not importable from $PYTHON"
-        log "built G6K, using: $PYTHON"
+        pushd "$G6K_DIR" >/dev/null
+        # Full fplll+fpylll+g6k build. Idempotent: skip if g6k-env already imports.
+        if [ -x "$PYTHON" ] && has_g6k "$PYTHON"; then
+            log "reusing existing G6K build in $G6K_DIR/g6k-env"
+        else
+            log "building G6K from source (fplll + fpylll + g6k, slow)..."
+            ./bootstrap.sh -j "$JOBS" || die "G6K build failed -- check the log above (fplll/fpylll/g6k build)."
+        fi
+        # MAX_SIEVING_DIM lives in G6K's OWN configure (not fplll's / not
+        # setup.py), so set it here and rebuild just the g6k kernel if needed.
+        if [ -n "$MAX_SIEVING_DIM" ]; then
+            cur="$(grep -oP 'define MAX_SIEVING_DIM \K[0-9]+' kernel/g6k_config.h 2>/dev/null || echo 0)"
+            if [ "$cur" != "$MAX_SIEVING_DIM" ]; then
+                log "setting MAX_SIEVING_DIM=$MAX_SIEVING_DIM (was $cur) and rebuilding g6k kernel"
+                [ -x ./configure ] || ./autogen.sh
+                # Configure with the dim first so setup.py (which only runs
+                # ./configure when no Makefile exists) preserves it; make clean
+                # forces the kernel .o's to rebuild against the new g6k_config.h.
+                ./configure --with-max-sieving-dim="$MAX_SIEVING_DIM"
+                make clean >/dev/null 2>&1 || true
+                "$PYTHON" setup.py build_ext -j "$JOBS" --inplace \
+                    || "$PYTHON" setup.py build_ext --inplace \
+                    || die "g6k kernel rebuild for MAX_SIEVING_DIM=$MAX_SIEVING_DIM failed"
+            else
+                log "MAX_SIEVING_DIM already $MAX_SIEVING_DIM"
+            fi
+        fi
+        popd >/dev/null
+        has_g6k "$PYTHON" || die "G6K built but not importable from $PYTHON (with PYTHONPATH=$G6K_PYTHONPATH)"
+        log "using freshly built G6K: $PYTHON  (PYTHONPATH+=$G6K_PYTHONPATH)"
     else
         die "no Python with G6K found. Either activate one and set \$BAZOOKA_SIEVE_PYTHON,
        pass --python /path/to/python, or re-run with --build-g6k (slow, from source).
@@ -158,6 +186,10 @@ ENV_FILE="$REPO/worker/sieve-env.sh"
     echo "export BAZOOKA_SIEVE_WORKER=\"$REPO/worker/worker_cli.py\""
     echo "export BDD_PREDICATE_DIR=\"$BDD_DIR\""
     [ -n "$SHIM_SO" ] && echo "export BAZOOKA_PREDICATE_SO=\"$SHIM_SO\""
+    # A from-source G6K is in-place; put it on PYTHONPATH (inherited by the
+    # worker subprocess the C++ tool spawns).
+    [ -n "$G6K_PYTHONPATH" ] && \
+        echo "export PYTHONPATH=\"$G6K_PYTHONPATH\${PYTHONPATH:+:\$PYTHONPATH}\""
 } > "$ENV_FILE"
 log "wrote $ENV_FILE"
 
