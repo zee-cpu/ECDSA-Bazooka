@@ -13,6 +13,7 @@
 #include "parser.h"
 #include "pair_computation.h"
 #include "recovery_engine.h"
+#include "sieve_estimator.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -488,6 +489,29 @@ void test_per_signature_leaked_bits() {
     check(b.empty(), "out-of-range LeakedBits (300) is rejected");
 }
 
+void test_sieve_estimator() {
+    std::cout << "-- sieve cost estimator (g6k-free) --\n";
+    sieve_estimator::MachineFacts m{4, 8.0};
+
+    auto l2 = sieve_estimator::estimate(2.0, m);
+    check(l2.dim == 131, "L=2 -> lattice dim 131");
+    check(std::abs(l2.log2_cycles - 57.24) < 0.1, "L=2 -> ~2^57.2 cycles");
+
+    auto l3 = sieve_estimator::estimate(3.0, m);
+    check(l3.dim == 89, "L=3 -> lattice dim 89");
+    check(std::abs(l3.log2_cycles - 41.79) < 0.1, "L=3 -> ~2^41.8 cycles");
+
+    // Fractional L is accepted and lands between the integer neighbours.
+    auto l25 = sieve_estimator::estimate(2.5, m);
+    check(l25.dim > l2.dim - 30 && l25.dim < l2.dim, "L=2.5 -> dim between L=3 and L=2");
+
+    // wall_hours scales down with cores; RAM is a positive range.
+    check(l2.wall_hours > 0 && l2.wall_hours < l2.core_hours, "wall_hours = core_hours/cores");
+    check(l2.ram_high_gb >= l2.ram_low_gb && l2.ram_low_gb > 0, "RAM is a positive range");
+    check(!l2.feasible_here, "L=2 not feasible on an 8 GB machine");
+    check(sieve_estimator::estimate(6.0, m).feasible_here, "L=6 feasible on 8 GB");
+}
+
 // ---------------------------------------------------------------------
 // Modulo / Extended-HNP recovery (Phase 6c). The nonce satisfies
 // k mod omega in [0, bound) -- a zero window in the MIDDLE of k (neither MSB nor
@@ -943,6 +967,8 @@ int main() {
     test_known_lsb();
     std::cout << "\n";
     test_per_signature_leaked_bits();
+    std::cout << "\n";
+    test_sieve_estimator();
     std::cout << "\n";
     test_modulo_ehnp();
     std::cout << "\n";

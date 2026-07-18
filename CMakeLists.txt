@@ -34,6 +34,7 @@ add_library(ecdsa_recovery_core STATIC
     src/verifier.cpp
     src/utils.cpp
     src/secp256k1.cpp
+    src/sieve_estimator.cpp
 )
 
 target_include_directories(ecdsa_recovery_core PUBLIC
