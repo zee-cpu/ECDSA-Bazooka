@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git build-essential cmake pkg-config \
         libgmp-dev libgmpxx4ldbl libfplll-dev libfplll8t64 libmpfr-dev \
         autoconf automake libtool \
-        python3 python3-pip python3-venv \
+        python3 python3-pip python3-venv python3-dev python-is-python3 python3-virtualenv \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ecdsa-bazooka
