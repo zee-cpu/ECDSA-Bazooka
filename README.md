@@ -107,4 +107,8 @@ runtime, option, and troubleshooting reference.
 
 ## License
 
-Released under the MIT License. See [LICENSE](LICENSE).
+Released under the GNU General Public License, version 2. See [LICENSE](LICENSE).
+
+The sieving recovery path links G6K and fpylll (both GPL-2.0); the project is
+therefore distributed under GPL-2.0. Earlier releases were MIT — this project
+was relicensed to GPL-2.0 to permit that linkage. Copyright (c) 2026 zee-cpu.
