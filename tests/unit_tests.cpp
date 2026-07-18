@@ -14,6 +14,7 @@
 #include "pair_computation.h"
 #include "recovery_engine.h"
 #include "sieve_estimator.h"
+#include "sieve_config.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -487,6 +488,22 @@ void test_per_signature_leaked_bits() {
         << "PubKey: " << pubkey.get_str(16) << "\nLeakedBits: 300\n\n"; }
     Telemetry t2; auto b = SignatureParser::parse_file(bad, &t2);
     check(b.empty(), "out-of-range LeakedBits (300) is rejected");
+}
+
+void test_sieve_config() {
+    std::cout << "-- zero-config sieve env resolution --\n";
+    const std::string p = "/tmp/test_sieve_env.sh";
+    { std::ofstream f(p);
+      f << "# generated\n"
+        << "export BAZOOKA_SIEVE_PYTHON=\"/opt/py\"\n"
+        << "export BAZOOKA_SIEVE_WORKER=\"/opt/worker_cli.py\"\n"
+        << "export PYTHONPATH=\"/opt/g6k${PYTHONPATH:+:$PYTHONPATH}\"\n"; }
+    auto vars = sieve_config::parse_env_file(p);
+    check(vars["BAZOOKA_SIEVE_PYTHON"] == "/opt/py", "parses quoted export value");
+    check(vars["BAZOOKA_SIEVE_WORKER"] == "/opt/worker_cli.py", "parses second export");
+    check(vars.count("PYTHONPATH") == 1, "captures PYTHONPATH line");
+    check(sieve_config::parse_env_file("/tmp/does_not_exist_xyz.sh").empty(),
+          "missing file -> empty map (no throw)");
 }
 
 void test_sieve_estimator() {
@@ -973,6 +990,8 @@ int main() {
     test_per_signature_leaked_bits();
     std::cout << "\n";
     test_sieve_estimator();
+    std::cout << "\n";
+    test_sieve_config();
     std::cout << "\n";
     test_modulo_ehnp();
     std::cout << "\n";

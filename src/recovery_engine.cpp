@@ -5,6 +5,7 @@
 #include "utils.h"
 #include "secp256k1.h"
 #include "sieve_estimator.h"
+#include "sieve_config.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -367,6 +368,8 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     size_t max_sigs,
     const mpz& pubkey_hint
 ) {
+    sieve_config::ensure_env();  // pick up worker/sieve-env.sh if env not set
+
     tel_.active_method = static_cast<int>(RecoveryMethod::SIEVE);
     tel_.method_chosen = true;
     tel_.set_phase("Sieving-with-predicate (external g6k worker)");
