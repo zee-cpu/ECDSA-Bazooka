@@ -22,4 +22,10 @@ namespace sieve_config {
     // env is already configured or no file is found.
     void ensure_env();
 
+    // Compose the PYTHONPATH value for the worker from a sieve-env.sh value that
+    // may use the shell idiom `DIR${PYTHONPATH:+:$PYTHONPATH}`: take the literal
+    // prefix before the first '$', then prepend it to `current` (the process's
+    // existing PYTHONPATH), matching what sourcing the file in a shell would do.
+    std::string resolve_pythonpath(const std::string& file_value, const std::string& current);
+
 } // namespace sieve_config

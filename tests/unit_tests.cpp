@@ -504,6 +504,16 @@ void test_sieve_config() {
     check(vars.count("PYTHONPATH") == 1, "captures PYTHONPATH line");
     check(sieve_config::parse_env_file("/tmp/does_not_exist_xyz.sh").empty(),
           "missing file -> empty map (no throw)");
+
+    check(sieve_config::resolve_pythonpath("/opt/g6k${PYTHONPATH:+:$PYTHONPATH}", "") == "/opt/g6k",
+          "PYTHONPATH shell idiom stripped to literal dir when none set");
+    check(sieve_config::resolve_pythonpath("/opt/g6k${PYTHONPATH:+:$PYTHONPATH}", "/x") == "/opt/g6k:/x",
+          "PYTHONPATH composed with existing value");
+    {
+        const std::string p2 = "/tmp/test_sieve_env2.sh";
+        { std::ofstream f(p2); f << "export FOO=\"a#b\"\n"; }
+        check(sieve_config::parse_env_file(p2)["FOO"] == "a#b", "'#' inside quotes is not a comment");
+    }
 }
 
 void test_sieve_estimator() {
