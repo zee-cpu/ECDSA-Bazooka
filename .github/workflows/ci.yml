@@ -84,3 +84,17 @@ jobs:
             echo "key mismatch: ground-truth=$gt recovered=$rec"; exit 1
           fi
           echo "e2e OK: recovered $rec"
+
+  docker-smoke:
+    name: Docker image builds + easy recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build core image (skip g6k for speed)
+        run: docker build --build-arg SKIP_SIEVE=1 -t bz:ci .
+      - name: Easy recovery inside the container
+        run: |
+          python3 -m pip install --break-system-packages ecdsa || pip3 install ecdsa
+          python3 scripts/generate_mock_signatures.py --count 500 --bias msb \
+            --bias-bits 12 --output /tmp/demo.txt --seed 1
+          docker run --rm -v /tmp:/data bz:ci -i /data/demo.txt -q | grep -i "VERIFIED"
