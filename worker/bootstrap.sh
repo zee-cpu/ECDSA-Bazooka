@@ -12,8 +12,11 @@
 #   6. Verify the whole chain imports and the shim loads.
 #
 # Usage:
-#   worker/bootstrap.sh [--python PATH] [--build-g6k] [--max-sieving-dim N]
-#                       [--jobs N] [--skip-shim]
+#   worker/bootstrap.sh [--python PATH] [--build-g6k] [--force-build]
+#                       [--max-sieving-dim N] [--jobs N] [--skip-shim]
+#
+#   --force-build  ignore any G6K already installed and build a fresh one into
+#                  third_party/g6k (useful for testing the from-source path).
 #
 # The common case is fully automatic: if a G6K-enabled Python is already on PATH
 # (or in $BAZOOKA_SIEVE_PYTHON) it is detected and used. Building G6K from source
@@ -27,6 +30,7 @@ G6K_DIR="$THIRD_PARTY/g6k"
 
 PY_ARG=""
 BUILD_G6K=0
+FORCE_BUILD=0
 MAX_SIEVING_DIM=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
 SKIP_SHIM=0
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --python)           PY_ARG="$2"; shift 2 ;;
         --build-g6k)        BUILD_G6K=1; shift ;;
+        --force-build)      FORCE_BUILD=1; BUILD_G6K=1; shift ;;
         --max-sieving-dim)  MAX_SIEVING_DIM="$2"; BUILD_G6K=1; shift 2 ;;
         --jobs)             JOBS="$2"; shift 2 ;;
         --skip-shim)        SKIP_SHIM=1; shift ;;
@@ -53,18 +58,35 @@ has_g6k() { "$1" -c "import g6k, fpylll" >/dev/null 2>&1; }
 # 1. Locate a Python with G6K.
 # ---------------------------------------------------------------------------
 PYTHON=""
-for cand in "$PY_ARG" "${BAZOOKA_SIEVE_PYTHON:-}" \
-            "$G6K_DIR/g6k-env/bin/python" python3 python; do
-    [ -n "$cand" ] || continue
-    if command -v "$cand" >/dev/null 2>&1 && has_g6k "$cand"; then
-        PYTHON="$(command -v "$cand")"
-        log "found G6K in: $PYTHON"
-        break
-    fi
-done
+if [ "$FORCE_BUILD" -eq 1 ]; then
+    log "--force-build: skipping detection, building G6K from source"
+else
+    for cand in "$PY_ARG" "${BAZOOKA_SIEVE_PYTHON:-}" \
+                "$G6K_DIR/g6k-env/bin/python" python3 python; do
+        [ -n "$cand" ] || continue
+        if command -v "$cand" >/dev/null 2>&1 && has_g6k "$cand"; then
+            PYTHON="$(command -v "$cand")"
+            log "found G6K in: $PYTHON"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PYTHON" ]; then
     if [ "$BUILD_G6K" -eq 1 ]; then
+        # Fail early (before the long clone/build) if the autotools toolchain
+        # G6K's fplll build needs is incomplete.
+        missing=""
+        for tool in git make autoconf automake libtool g++ pkg-config; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+        done
+        [ -f /usr/include/mpfr.h ] || missing="$missing libmpfr-dev(mpfr.h)"
+        if [ -n "$missing" ]; then
+            die "missing build prerequisites:$missing
+       Install them first, e.g. on Debian/Ubuntu:
+         sudo apt-get install -y git build-essential autoconf automake libtool pkg-config libmpfr-dev libgmp-dev
+       then re-run this script."
+        fi
         log "no G6K Python found -- building G6K from source (this is slow)..."
         mkdir -p "$THIRD_PARTY"
         if [ ! -d "$G6K_DIR/.git" ]; then
