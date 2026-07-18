@@ -454,7 +454,9 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     // GPL g6k component; keep its path out of the binary).
     const char* worker = std::getenv("BAZOOKA_SIEVE_WORKER");
     if (!worker || !*worker) {
-        tel_.set_error("Sieve worker not configured (set BAZOOKA_SIEVE_WORKER)");
+        tel_.set_error("This input needs the sieve route (deep leakage, L<=3), which is "
+                       "not set up here. Run worker/bootstrap.sh, or use the Docker image. "
+                       "Run --check for details.");
         return std::nullopt;
     }
     const char* python = std::getenv("BAZOOKA_SIEVE_PYTHON");

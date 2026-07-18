@@ -1,5 +1,7 @@
 #include "sieve_config.h"
 
+#include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <unistd.h>
@@ -93,6 +95,48 @@ void ensure_env() {
             setenv(k.c_str(), v.c_str(), /*overwrite=*/0);
         }
     }
+}
+
+namespace {
+    bool file_exists(const std::string& p) { std::ifstream f(p); return f.good(); }
+    // Best-effort: does `python -c "import g6k"` succeed? Empty python -> unknown.
+    bool python_has_g6k(const std::string& py, const std::string& pythonpath) {
+        if (py.empty()) return false;
+        std::string cmd = (pythonpath.empty() ? "" : "PYTHONPATH=\"" + pythonpath + "\" ")
+                        + py + " -c \"import g6k\" >/dev/null 2>&1";
+        return std::system(cmd.c_str()) == 0;
+    }
+}
+
+std::string check_report() {
+    std::string r = "core recovery : ready\n";
+    auto path = find_env_file();
+    if (const char* w = std::getenv("BAZOOKA_SIEVE_WORKER"); (!w || !*w) && !path) {
+        r += "sieve route   : NOT set up (no worker/sieve-env.sh found)\n";
+        r += "                fix: run worker/bootstrap.sh  (or use the Docker image)\n";
+        return r;
+    }
+    auto vars = path ? parse_env_file(*path) : std::map<std::string, std::string>{};
+    auto val = [&](const char* k) -> std::string {
+        if (const char* e = std::getenv(k); e && *e) return e;
+        auto it = vars.find(k); return it == vars.end() ? "" : it->second;
+    };
+    std::string worker = val("BAZOOKA_SIEVE_WORKER");
+    std::string py = val("BAZOOKA_SIEVE_PYTHON");
+    std::string so = val("BAZOOKA_PREDICATE_SO");
+    std::string pp = val("PYTHONPATH");
+    std::string bdd = val("BDD_PREDICATE_DIR");
+
+    if (worker.empty() || !file_exists(worker))
+        return r + "sieve route   : NOT set up (worker_cli.py not found)\n                fix: run worker/bootstrap.sh\n";
+    if (!so.empty() && !file_exists(so))
+        return r + "sieve route   : NOT set up (predicate shim not built)\n                fix: cmake --build --preset release --target bazooka_predicate\n";
+    if (!bdd.empty() && !file_exists(bdd + "/usvp.py"))
+        return r + "sieve route   : NOT set up (bdd-predicate missing)\n                fix: run worker/bootstrap.sh\n";
+    if (!python_has_g6k(py, pp))
+        return r + "sieve route   : NOT set up (g6k not importable)\n                fix: run worker/bootstrap.sh --build-g6k\n";
+    r += "sieve route   : ready\n";
+    return r;
 }
 
 } // namespace sieve_config

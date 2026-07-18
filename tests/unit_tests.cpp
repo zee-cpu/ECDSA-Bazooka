@@ -514,6 +514,10 @@ void test_sieve_config() {
         { std::ofstream f(p2); f << "export FOO=\"a#b\"\n"; }
         check(sieve_config::parse_env_file(p2)["FOO"] == "a#b", "'#' inside quotes is not a comment");
     }
+
+    std::string rep = sieve_config::check_report();
+    check(rep.find("core recovery") != std::string::npos, "check_report mentions core recovery");
+    check(rep.find("sieve route") != std::string::npos, "check_report mentions sieve route");
 }
 
 void test_sieve_estimator() {

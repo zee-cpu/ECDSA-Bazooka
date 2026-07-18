@@ -5,6 +5,7 @@
 #include "telemetry.h"
 #include "utils.h"
 #include "sieve_estimator.h"
+#include "sieve_config.h"
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -36,6 +37,7 @@ static void print_usage(const char* prog) {
     std::cout << "                         when N is too small (<=3) for statistical detection. May be\n";
     std::cout << "                         fractional (e.g. 2.5 -> mixed per-signature bounds). Requires a pubkey.\n";
     std::cout << "      --dry-run          Print the sieve cost estimate for --leaked-bits and exit (no g6k needed)\n";
+    std::cout << "      --check            Report which recovery routes are ready on this machine, then exit\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -117,7 +119,7 @@ int main(int argc, char** argv) {
     enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001,
            OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003,
            OPT_LCG_A = 1004, OPT_LCG_B = 1005, OPT_LEAKED_BITS = 1006,
-           OPT_DRY_RUN = 1007 };
+           OPT_DRY_RUN = 1007, OPT_CHECK = 1008 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -133,6 +135,7 @@ int main(int argc, char** argv) {
         {"lcg-b", required_argument, 0, OPT_LCG_B},
         {"leaked-bits", required_argument, 0, OPT_LEAKED_BITS},
         {"dry-run", no_argument, 0, OPT_DRY_RUN},
+        {"check", no_argument, 0, OPT_CHECK},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -215,6 +218,9 @@ int main(int argc, char** argv) {
             case OPT_DRY_RUN:
                 dry_run = true;
                 break;
+            case OPT_CHECK:
+                std::cout << sieve_config::check_report();
+                return 0;
             case 'h':
                 print_usage(argv[0]);
                 return 0;

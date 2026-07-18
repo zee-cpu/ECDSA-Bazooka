@@ -28,4 +28,9 @@ namespace sieve_config {
     // existing PYTHONPATH), matching what sourcing the file in a shell would do.
     std::string resolve_pythonpath(const std::string& file_value, const std::string& current);
 
+    // Multi-line readiness report for `--check`: core always ready; sieve route
+    // ready or the specific missing piece + its fix. Does not require g6k to run;
+    // the g6k import probe is best-effort.
+    std::string check_report();
+
 } // namespace sieve_config
