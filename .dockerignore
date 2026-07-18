@@ -1,0 +1,10 @@
+build/
+build-*/
+third_party/
+worker/build/
+worker/sieve-env.sh
+docs/superpowers/
+data/*.txt
+**/__pycache__/
+**/*.so
+.git/
