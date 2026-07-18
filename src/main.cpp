@@ -4,6 +4,7 @@
 #include "recovery_engine.h"
 #include "telemetry.h"
 #include "utils.h"
+#include "sieve_estimator.h"
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -34,6 +35,7 @@ static void print_usage(const char* prog) {
     std::cout << "      --leaked-bits N    MSB leakage width for the sieve route (k < 2^(256-N)); needed\n";
     std::cout << "                         when N is too small (<=3) for statistical detection. May be\n";
     std::cout << "                         fractional (e.g. 2.5 -> mixed per-signature bounds). Requires a pubkey.\n";
+    std::cout << "      --dry-run          Print the sieve cost estimate for --leaked-bits and exit (no g6k needed)\n";
     std::cout << "  -h, --help             Show this help\n";
     std::cout << "\n";
     std::cout << "Example:\n";
@@ -110,10 +112,12 @@ int main(int argc, char** argv) {
     bool modulo_bound_supplied = false;
     bool lcg_a_supplied = false;
     bool lcg_b_supplied = false;
+    bool dry_run = false;
 
     enum { OPT_ALLOW_NO_PUBKEY = 1000, OPT_SEED = 1001,
            OPT_MOD_OMEGA = 1002, OPT_MOD_BOUND = 1003,
-           OPT_LCG_A = 1004, OPT_LCG_B = 1005, OPT_LEAKED_BITS = 1006 };
+           OPT_LCG_A = 1004, OPT_LCG_B = 1005, OPT_LEAKED_BITS = 1006,
+           OPT_DRY_RUN = 1007 };
     static struct option long_opts[] = {
         {"input", required_argument, 0, 'i'},
         {"method", required_argument, 0, 'm'},
@@ -128,6 +132,7 @@ int main(int argc, char** argv) {
         {"lcg-a", required_argument, 0, OPT_LCG_A},
         {"lcg-b", required_argument, 0, OPT_LCG_B},
         {"leaked-bits", required_argument, 0, OPT_LEAKED_BITS},
+        {"dry-run", no_argument, 0, OPT_DRY_RUN},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -207,6 +212,9 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 break;
+            case OPT_DRY_RUN:
+                dry_run = true;
+                break;
             case 'h':
                 print_usage(argv[0]);
                 return 0;
@@ -214,6 +222,21 @@ int main(int argc, char** argv) {
                 print_usage(argv[0]);
                 return 1;
         }
+    }
+
+    if (dry_run) {
+        double L = msb_leaked_bits > 0.0 ? msb_leaked_bits : 2.0;
+        auto mach = sieve_estimator::detect_machine();
+        auto e = sieve_estimator::estimate(L, mach);
+        std::cout << "Sieve cost estimate (Albrecht-Heninger model; approximate)\n"
+                  << "  leak level L      : " << L << "  (nonce < 2^" << (256.0 - L) << ")\n"
+                  << "  lattice dimension : " << e.dim << " (m=" << e.m << " signatures)\n"
+                  << "  compute           : 2^" << e.log2_cycles << " cycles (~" << e.core_hours << " core-hours)\n"
+                  << "  memory (sieve DB) : ~" << e.ram_low_gb << "-" << e.ram_high_gb << " GB\n"
+                  << "  this machine      : " << mach.cores << " cores, " << mach.ram_gb << " GB RAM\n"
+                  << "  est. wall time    : ~" << e.wall_hours << " core-adjusted hours\n"
+                  << "  feasible here     : " << (e.feasible_here ? "yes (RAM fits)" : "NO -- needs more RAM/cores") << "\n";
+        return 0;
     }
 
     if (input_file.empty() && optind < argc) {

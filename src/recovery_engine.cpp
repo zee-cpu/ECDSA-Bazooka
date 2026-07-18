@@ -4,11 +4,13 @@
 #include "bias_profiler.h"
 #include "utils.h"
 #include "secp256k1.h"
+#include "sieve_estimator.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -341,6 +343,22 @@ namespace {
         out.insert(out.end(), m - static_cast<size_t>(nz), hi);
         return out;
     }
+
+    // Human-readable one-block cost estimate for a leak level, on this machine.
+    std::string format_sieve_estimate(double leaked_bits) {
+        auto mach = sieve_estimator::detect_machine();
+        auto e = sieve_estimator::estimate(leaked_bits, mach);
+        std::ostringstream s;
+        s << "  Sieve estimate for L=" << leaked_bits << " (dim " << e.dim << "):\n"
+          << "    compute : 2^" << std::fixed << std::setprecision(1) << e.log2_cycles
+          << " cycles  (~" << std::setprecision(0) << e.core_hours << " core-hours)\n"
+          << "    memory  : ~" << std::setprecision(1) << e.ram_low_gb << "-" << e.ram_high_gb << " GB (sieve DB)\n"
+          << "    this box: " << mach.cores << " cores, " << std::setprecision(1) << mach.ram_gb << " GB"
+          << "  -> ~" << (e.wall_hours < 48 ? e.wall_hours : e.wall_hours / 24.0)
+          << (e.wall_hours < 48 ? " wall-hours" : " wall-days")
+          << (e.feasible_here ? "" : "  [WARNING: RAM likely insufficient here]");
+        return s.str();
+    }
 } // namespace
 
 std::optional<mpz> RecoveryEngine::try_sieve(
@@ -421,6 +439,13 @@ std::optional<mpz> RecoveryEngine::try_sieve(
            << ",\"" << s.s.get_str(16) << "\"]";
     }
     js << "]}";
+
+    // Warn-then-run: show the honest cost on this machine, then proceed.
+    {
+        std::string est = format_sieve_estimate(profile.estimated_leaked_bits);
+        tel_.set_status("Sieve: estimating cost");
+        std::cerr << est << "\n  Starting sieve (Ctrl-C to abort; --max-time to bound)...\n";
+    }
 
     // Worker location + interpreter from environment (the worker is the external
     // GPL g6k component; keep its path out of the binary).
