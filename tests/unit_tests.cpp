@@ -518,6 +518,12 @@ void test_sieve_config() {
     std::string rep = sieve_config::check_report();
     check(rep.find("core recovery") != std::string::npos, "check_report mentions core recovery");
     check(rep.find("sieve route") != std::string::npos, "check_report mentions sieve route");
+
+    // Security: an injection-shaped python path must NOT be shell-executed.
+    std::remove("/tmp/bz_g6k_probe_pwned");
+    (void)sieve_config::python_has_g6k("/no/such/py; touch /tmp/bz_g6k_probe_pwned", "");
+    { std::ifstream pw("/tmp/bz_g6k_probe_pwned");
+      check(!pw.good(), "g6k probe does not shell-execute an injected command"); }
 }
 
 void test_sieve_estimator() {

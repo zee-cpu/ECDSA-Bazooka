@@ -1,11 +1,13 @@
 #include "sieve_config.h"
 
-#include <array>
-#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <unistd.h>
 #include <limits.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <csignal>
+#include <ctime>
 
 namespace sieve_config {
 
@@ -99,13 +101,30 @@ void ensure_env() {
 
 namespace {
     bool file_exists(const std::string& p) { std::ifstream f(p); return f.good(); }
-    // Best-effort: does `python -c "import g6k"` succeed? Empty python -> unknown.
-    bool python_has_g6k(const std::string& py, const std::string& pythonpath) {
-        if (py.empty()) return false;
-        std::string cmd = (pythonpath.empty() ? "" : "PYTHONPATH=\"" + pythonpath + "\" ")
-                        + py + " -c \"import g6k\" >/dev/null 2>&1";
-        return std::system(cmd.c_str()) == 0;
+}
+
+bool python_has_g6k(const std::string& py, const std::string& pythonpath) {
+    if (py.empty()) return false;
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); }
+        if (!pythonpath.empty()) setenv("PYTHONPATH", pythonpath.c_str(), 1);
+        execlp(py.c_str(), py.c_str(), "-c", "import g6k", static_cast<char*>(nullptr));
+        _exit(127);  // exec failed
     }
+    for (int i = 0; i < 200; ++i) {          // poll up to ~10s
+        int status = 0;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (r < 0) return false;
+        struct timespec ts{0, 50 * 1000 * 1000};  // 50ms
+        nanosleep(&ts, nullptr);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    return false;
 }
 
 std::string check_report() {
@@ -124,7 +143,7 @@ std::string check_report() {
     std::string worker = val("BAZOOKA_SIEVE_WORKER");
     std::string py = val("BAZOOKA_SIEVE_PYTHON");
     std::string so = val("BAZOOKA_PREDICATE_SO");
-    std::string pp = val("PYTHONPATH");
+    std::string pp = resolve_pythonpath(val("PYTHONPATH"), "");
     std::string bdd = val("BDD_PREDICATE_DIR");
 
     if (worker.empty() || !file_exists(worker))
