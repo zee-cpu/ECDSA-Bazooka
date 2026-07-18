@@ -75,6 +75,12 @@ bool SignatureParser::validate_signature(Signature& sig) {
             return false;
         }
     }
+    // Sieve route: a supplied per-signature MSB leakage width must leave a
+    // sensibly-sized nonce (1 <= N <= 200, so the nonce keeps >= 56 bits).
+    if (sig.msb_leaked_bits != 0 && (sig.msb_leaked_bits < 1 || sig.msb_leaked_bits > 200)) {
+        sig.reject_reason = "LeakedBits out of range [1, 200]";
+        return false;
+    }
     sig.reject_reason.clear();
     return true;
 }
@@ -85,6 +91,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     bool r_ok = false, s_ok = false, z_ok = false, pk_ok = false;
     bool timestamp_seen = false, timestamp_ok = false;
     bool known_low_seen = false, known_low_ok = false;
+    bool leaked_seen = false, leaked_ok = false;
     std::istringstream iss(block_text);
     std::string line;
 
@@ -133,6 +140,25 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
                     } catch (...) {}
                 }
             }
+        } else if (l.find("LeakedBits") == 0) {
+            // Sieve route: known MSB-zero leakage width for this signature's
+            // nonce. Format: "LeakedBits: <N>", meaning k < 2^(256-N). Enables
+            // per-signature (non-uniform) bounds for real variable-leakage data.
+            // Range-checked in validate_signature.
+            if (leaked_seen) { leaked_ok = false; continue; }
+            leaked_seen = true;
+            size_t c = l.find(':');
+            if (c != std::string::npos) {
+                std::string vstr = trim(l.substr(c + 1));
+                try {
+                    size_t consumed = 0;
+                    int n = std::stoi(vstr, &consumed);
+                    if (consumed == vstr.size()) {
+                        sig.msb_leaked_bits = n;
+                        leaked_ok = true;
+                    }
+                } catch (...) {}
+            }
         } else if (l.find("TXID") == 0) {
             size_t c = l.find(':');
             if (c != std::string::npos) sig.txid = trim(l.substr(c + 1));
@@ -170,6 +196,7 @@ std::optional<Signature> SignatureParser::parse_block(const std::string& block_t
     if (pk_seen && !pk_ok) return reject("malformed PubKey (non-hex or over-length)");
     if (timestamp_seen && !timestamp_ok) return reject("malformed Timestamp");
     if (known_low_seen && !known_low_ok) return reject("malformed KnownLow");
+    if (leaked_seen && !leaked_ok) return reject("malformed LeakedBits");
 
     sig.valid = validate_signature(sig);
     return sig;

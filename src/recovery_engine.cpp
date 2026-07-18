@@ -382,8 +382,18 @@ std::optional<mpz> RecoveryEngine::try_sieve(
         return std::nullopt;
     }
 
-    // Per-signature nonce bit lengths (uniform for integer L, mixed for fractional).
-    std::vector<int> klen_list = make_klen_list(klen_avg, use.size());
+    // Per-signature nonce bit lengths. If every used signature carries an exact
+    // supplied leakage width, use those (real variable-leakage data); otherwise
+    // fall back to the make_klen_list split from the average.
+    std::vector<int> klen_list;
+    bool all_per_signature = std::all_of(use.begin(), use.end(),
+        [](const Signature* s) { return s->msb_leaked_bits > 0; });
+    if (all_per_signature) {
+        klen_list.reserve(use.size());
+        for (const Signature* s : use) klen_list.push_back(256 - s->msb_leaked_bits);
+    } else {
+        klen_list = make_klen_list(klen_avg, use.size());
+    }
 
     // Uncompressed pubkey mpz -> affine point -> x||y (64 hex each) for the worker.
     auto pt = secp256k1::pubkey_to_point(pubkey_hint);
@@ -641,7 +651,27 @@ RecoveryResult RecoveryEngine::run(
     } else {
         BiasProfile profile;
         int known_bits = uniform_known_low_bits(signatures);
-        if (msb_leaked_bits > 0.0) {
+        // Per-signature MSB leakage supplied in the input (LeakedBits: N on every
+        // valid signature). The exact per-signature bounds drive the sieve; the
+        // average sets the profile/gate. Takes precedence over the global hint.
+        size_t n_valid = 0, n_leaked = 0;
+        double sum_leaked = 0.0;
+        for (const auto& s : signatures) {
+            if (!s.valid) continue;
+            n_valid++;
+            if (s.msb_leaked_bits > 0) { n_leaked++; sum_leaked += s.msb_leaked_bits; }
+        }
+        bool per_signature_leak = (n_valid > 0 && n_leaked == n_valid);
+        if (per_signature_leak) {
+            profile.type = BiasType::MSB;
+            profile.estimated_leaked_bits = sum_leaked / static_cast<double>(n_valid);
+            profile.bias_detected = true;
+            profile.description = "MSB leak (per-signature supplied): avg " +
+                std::to_string(profile.estimated_leaked_bits) + " leaked high bit(s)";
+            tel_.set_phase("Per-signature-MSB recovery");
+            tel_.leaked_bits_est = profile.estimated_leaked_bits;
+            tel_.bias_type = static_cast<int>(BiasType::MSB);
+        } else if (msb_leaked_bits > 0.0) {
             // Sieve hint: the MSB-zero leakage width is *supplied* (side-channel
             // model), not detected. Build the MSB profile directly so the deep-leak
             // sieve route has the exact L it needs -- statistical detection fails at

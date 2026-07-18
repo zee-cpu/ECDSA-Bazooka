@@ -43,6 +43,11 @@ struct Signature {
     // nonzero residue). 0 <= known_low_value < 2^known_low_bits.
     int known_low_bits = 0;
     mpz known_low_value = 0;
+    // Sieve route: known MSB-zero leakage width for THIS signature's nonce
+    // (k < 2^(256-msb_leaked_bits)). 0 means "not supplied". Lets real
+    // variable-leakage data carry an exact per-signature bound, rather than a
+    // single global --leaked-bits average. Range-checked in the parser.
+    int msb_leaked_bits = 0;
 };
 
 // Computed (w, x) pair

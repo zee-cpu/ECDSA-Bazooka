@@ -288,6 +288,26 @@ Exact-constraint routing requires every usable signature to carry the same
 width; the residue value may differ per signature. Partial or mixed-width sets
 fall back to normal structure detection.
 
+`LeakedBits` supplies the MSB-zero leakage width for a single signature's nonce,
+for the sieving-with-predicate route (deep leaks, roughly `L <= 3`):
+
+```text
+Signature #1
+R = ...
+S = ...
+Z = ...
+PubKey: 04...
+LeakedBits: 3
+```
+
+`LeakedBits: 3` means `k < 2^(256-3)`. The width must be from 1 through 200.
+Because the widths are per signature, they may differ across records, which
+lets real variable-leakage side-channel data express a non-uniform (and hence
+fractional-average) leak exactly. When every usable signature carries a
+`LeakedBits` value and a public key is present, the sieve route is used with
+those exact bounds -- no `--leaked-bits` flag needed. For a single global
+value instead, use `--leaked-bits N` (which may be fractional, e.g. `2.5`).
+
 ## Expected behavior
 
 These are practical guidelines, not fixed performance guarantees.

@@ -453,6 +453,41 @@ void test_known_lsb() {
     check(res.private_key == d, "recovered key equals the true private key");
 }
 
+// Per-signature MSB leakage width for the sieve route. "LeakedBits: N" states
+// that this signature's nonce satisfies k < 2^(256-N) -- the side-channel model
+// where different signatures may leak different numbers of high bits.
+void test_per_signature_leaked_bits() {
+    std::cout << "-- per-signature MSB LeakedBits (parser) --\n";
+    const mpz d("0x0a1b2c3d4e5f60718293a4b5c6d7e8f9000102030405060708090a0b0c0d0e0f");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    const std::string ok = "/tmp/test_leakedbits_ok.txt";
+    { std::ofstream f(ok);
+      f << "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\n"
+        << "PubKey: " << pubkey.get_str(16) << "\nLeakedBits: 3\n\n"; }
+    Telemetry t; auto s = SignatureParser::parse_file(ok, &t);
+    check(s.size() == 1 && s[0].msb_leaked_bits == 3,
+          "parser reads 'LeakedBits: 3' as 3 MSB leaked bits");
+
+    const std::string base = "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\nPubKey: " +
+                             pubkey.get_str(16) + "\n";
+    for (const auto& [line, desc] : std::vector<std::pair<std::string, std::string>>{
+             {"LeakedBits: nope\n", "nonnumeric LeakedBits"},
+             {"LeakedBits: 3 x\n", "trailing LeakedBits garbage"},
+         }) {
+        auto m = SignatureParser::parse_block(base + line);
+        check(m.has_value() && !m->valid && m->reject_reason == "malformed LeakedBits",
+              desc + std::string(" is rejected"));
+    }
+
+    const std::string bad = "/tmp/test_leakedbits_bad.txt";
+    { std::ofstream f(bad);
+      f << "Signature #1\nR = 0x1\nS = 0x2\nZ = 0x3\n"
+        << "PubKey: " << pubkey.get_str(16) << "\nLeakedBits: 300\n\n"; }
+    Telemetry t2; auto b = SignatureParser::parse_file(bad, &t2);
+    check(b.empty(), "out-of-range LeakedBits (300) is rejected");
+}
+
 // ---------------------------------------------------------------------
 // Modulo / Extended-HNP recovery (Phase 6c). The nonce satisfies
 // k mod omega in [0, bound) -- a zero window in the MIDDLE of k (neither MSB nor
@@ -906,6 +941,8 @@ int main() {
     test_repeated_nonce();
     std::cout << "\n";
     test_known_lsb();
+    std::cout << "\n";
+    test_per_signature_leaked_bits();
     std::cout << "\n";
     test_modulo_ehnp();
     std::cout << "\n";
