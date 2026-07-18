@@ -510,6 +510,10 @@ void test_sieve_estimator() {
     check(l2.ram_high_gb >= l2.ram_low_gb && l2.ram_low_gb > 0, "RAM is a positive range");
     check(!l2.feasible_here, "L=2 not feasible on an 8 GB machine");
     check(sieve_estimator::estimate(6.0, m).feasible_here, "L=6 feasible on 8 GB");
+
+    auto nan_est = sieve_estimator::estimate(std::nan(""), m);
+    auto l1 = sieve_estimator::estimate(1.0, m);
+    check(nan_est.dim == l1.dim && nan_est.dim > 0, "NaN leak clamps to L=1 (no UB)");
 }
 
 // ---------------------------------------------------------------------

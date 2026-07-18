@@ -30,15 +30,11 @@ MachineFacts detect_machine() {
 
 Estimate estimate(double leaked_bits, const MachineFacts& machine) {
     Estimate e{};
-    double L = leaked_bits < 1.0 ? 1.0 : leaked_bits;
+    double L = (!std::isfinite(leaked_bits) || leaked_bits < 1.0) ? 1.0 : leaked_bits;
 
-    // Sample threshold -- intended to match recovery_engine::try_sieve's
-    // target_m sizing (see its comment: "L=2 needs m~130, L=2.5 ~105, L=3
-    // ~88, L=5 ~52"). NOTE: try_sieve's current code literally computes
-    // ceil(258/L)+4, which drifts from its own comment above; this estimator
-    // follows the documented/intended sizing (ceil(256/L)+2) since that is
-    // what the comment -- and independent cost-model validation -- says the
-    // route actually needs. Flagged for a follow-up to reconcile try_sieve.
+    // Sample threshold -- matches recovery_engine::try_sieve's target_m
+    // sizing (ceil(256/L)+2), validated against the applicability thresholds
+    // L=2 -> dim131, L=3 -> dim89.
     e.m = static_cast<int>(std::ceil(256.0 / L)) + 2;
     e.dim = e.m + 1;
     double d = static_cast<double>(e.dim);

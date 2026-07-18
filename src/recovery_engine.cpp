@@ -365,9 +365,10 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     double leaked = profile.estimated_leaked_bits;
     if (leaked < 1.0) leaked = 1.0;
     double klen_avg = 256.0 - leaked;
-    // Applicability threshold grows ~ n/L; give a small margin. (Estimator:
-    // L=2 needs m~130, L=2.5 ~105, L=3 ~88, L=5 ~52.)
-    size_t target_m = static_cast<size_t>(std::ceil(258.0 / leaked)) + 4;
+    // Applicability threshold grows ~ n/L; give a small margin. Matches
+    // sieve_estimator::estimate's target_m sizing (ceil(256/L)+2): L=2 needs
+    // m~130, L=2.5 ~105, L=3 ~88, L=5 ~54.
+    size_t target_m = static_cast<size_t>(std::ceil(256.0 / leaked)) + 2;
     if (max_sigs > 0 && target_m > max_sigs) target_m = max_sigs;
 
     // Collect the valid signatures we'll hand to the sieve.
