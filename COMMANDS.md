@@ -17,7 +17,6 @@ sudo apt-get install -y \
   libgmp-dev \
   libgmpxx4ldbl \
   libfplll-dev \
-  libfplll9 \
   libmpfr-dev \
   python3-pip
 

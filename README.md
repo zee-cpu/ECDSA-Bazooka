@@ -11,7 +11,7 @@ failure rather than a wrong key.
 
 **Native:**
 ```bash
-sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl libfplll-dev libfplll9
+sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl libfplll-dev
 cmake --preset release && cmake --build --preset release -j"$(nproc)"
 python3 scripts/generate_mock_signatures.py --count 500 --bias msb --bias-bits 12 \
   --output data/demo.txt --seed 1
