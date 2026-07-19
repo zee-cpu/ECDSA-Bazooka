@@ -246,7 +246,7 @@ The sampling seed and numeric hints accept decimal or `0x`-prefixed values.
 | Option | Purpose | Default |
 |---|---|---|
 | `-i, --input FILE` | Input signature file | required |
-| `-m, --method METHOD` | `auto`, `lattice`, `fallback`, `modulo`, or `linear` | `auto` |
+| `-m, --method METHOD` | `auto`, `lattice`, `fallback`, `modulo`, `linear`, or `sieve` | `auto` |
 | `-s, --max-sigs N` | Maximum signatures to use | all |
 | `-t, --max-time SEC` | Time budget in seconds | unlimited |
 | `-v, --verbose` | Enable the live dashboard | on |
@@ -257,6 +257,9 @@ The sampling seed and numeric hints accept decimal or `0x`-prefixed values.
 | `--modulo-bound N` | Residue bound paired with the period | unset |
 | `--lcg-a N` | Linear multiplier | unset |
 | `--lcg-b N` | Linear increment; requires `--lcg-a` | `0` |
+| `--leaked-bits N` | MSB leakage width for the sieve route (k < 2^(256-N)); may be fractional. Requires a pubkey | unset |
+| `--dry-run` | Print the sieve cost estimate for `--leaked-bits` and exit (no g6k needed) | off |
+| `--check` | Report which recovery routes are ready on this machine, then exit | off |
 | `-h, --help` | Show command help | — |
 
 Show the live help at any time:
@@ -306,6 +309,8 @@ fractional-average) leak exactly. When every usable signature carries a
 `LeakedBits` value and a public key is present, the sieve route is used with
 those exact bounds -- no `--leaked-bits` flag needed. For a single global
 value instead, use `--leaked-bits N` (which may be fractional, e.g. `2.5`).
+See `worker/README.md` for setting up the sieve worker, and `README.md` for
+an overview of the route.
 
 ## Expected behavior
 

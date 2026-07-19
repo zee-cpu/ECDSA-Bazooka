@@ -443,13 +443,6 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     }
     js << "]}";
 
-    // Warn-then-run: show the honest cost on this machine, then proceed.
-    {
-        std::string est = format_sieve_estimate(profile.estimated_leaked_bits);
-        tel_.set_status("Sieve: estimating cost");
-        std::cerr << est << "\n  Starting sieve (Ctrl-C to abort; --max-time to bound)...\n";
-    }
-
     // Worker location + interpreter from environment (the worker is the external
     // GPL g6k component; keep its path out of the binary).
     const char* worker = std::getenv("BAZOOKA_SIEVE_WORKER");
@@ -461,6 +454,14 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     }
     const char* python = std::getenv("BAZOOKA_SIEVE_PYTHON");
     std::string py = (python && *python) ? python : "python3";
+
+    // Warn-then-run: show the honest cost on this machine, then proceed. Only
+    // printed once we know the worker is actually configured.
+    {
+        std::string est = format_sieve_estimate(profile.estimated_leaked_bits);
+        tel_.set_status("Sieve: estimating cost");
+        std::cerr << est << "\n  Starting sieve (Ctrl-C to abort; --max-time to bound)...\n";
+    }
 
     // Hand the spec to the worker on stdin via a temp file, read back the key.
     // The sieve is a batch operation; --max-time is intentionally not enforced
