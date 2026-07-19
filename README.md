@@ -2,108 +2,57 @@
 
 [![CI](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml/badge.svg)](https://github.com/zee-cpu/ECDSA-Bazooka/actions/workflows/ci.yml)
 
-This command-line tool analyzes ECDSA signatures produced by the same private
-key when their nonce values follow an exploitable structure. It selects a
-closed-form or lattice-based method based on the supplied data and options.
+Recovers an ECDSA private key from signatures whose nonces have an exploitable
+structure (biased high bits, reused nonces, modular windows, or linear/LCG
+relations). Every candidate is verified against the public key, so it reports
+failure rather than a wrong key.
 
-Every candidate is checked against the supplied public key. If the input does
-not provide enough usable structure, the program reports failure instead of
-returning an incorrect key.
+## Quickstart
 
-## What it handles
-
-| Pattern | Nonce model | Method |
-|---|---|---|
-| MSB bias | `k < 2^(256-L)` | LLL or BKZ lattice reduction |
-| LSB bias | `k ≡ 0 (mod 2^b)` | LSB transform and lattice reduction |
-| Known-offset LSB | `k ≡ c (mod 2^b)`, with `c` supplied | Exact-constraint lattice reduction |
-| Modulo window | `k mod ω ∈ [0, bound)` | Two-block Extended-HNP lattice |
-| Repeated nonce | Two signatures share the same `k` | Closed-form modular algebra |
-| Linear sequence | `k[i+1] = a·k[i] + b (mod n)` | Closed-form modular algebra |
-| Distributional skew | Low entropy without a per-value constraint | Detected when possible, but not recoverable by this tool |
-
-Repeated and linear patterns are checked automatically before the more
-expensive lattice paths. Use `--method` when you need to select a specific
-route.
-
-## Quick start
-
-From the repository root:
-
+**Native:**
 ```bash
-cmake --preset release
-cmake --build --preset release -j"$(nproc)"
-./build/unit_tests
-
-python3 scripts/generate_mock_signatures.py \
-  --count 500 \
-  --bias msb \
-  --bias-bits 12 \
-  --output data/demo.txt \
-  --seed 1
-
+sudo apt-get install -y cmake g++ libgmp-dev libgmpxx4ldbl libfplll-dev libfplll9
+cmake --preset release && cmake --build --preset release -j"$(nproc)"
+python3 scripts/generate_mock_signatures.py --count 500 --bias msb --bias-bits 12 \
+  --output data/demo.txt --seed 1
 ./build/ecdsa_nonce_recovery -i data/demo.txt -q
 ```
 
-See [COMMANDS.md](COMMANDS.md) for prerequisites, all build and test variants,
-fixture recipes, and the complete CLI reference.
+**Docker (everything prebuilt, incl. the sieve):**
+```bash
+docker run --rm -v "$PWD/data:/data" ghcr.io/zee-cpu/ecdsa-bazooka -i /data/demo.txt -q
+```
 
-## Practical limits
+## Which case are you in?
 
-Difficulty increases sharply as the number of constrained bits decreases.
-These ranges describe the current 256-bit lattice path; results still depend
-on the input set and available time.
-
-| Constrained bits | Expected path | Practical expectation |
+| Your situation | What to do | What to expect |
 |---|---|---|
-| 7 or more | LLL | Normally fast and reliable for suitable inputs |
-| 5–6 | Focused BKZ | Often needs a larger `--max-time` budget |
-| 4 | Heavier BKZ | Best-effort and not guaranteed for every input |
-| 3 or fewer | — | Outside practical scope for this implementation |
+| 7+ known nonce bits | just run it | fast (LLL) |
+| 4–6 bits | just run it | give it a time budget (`--max-time`) |
+| 3 bits | sieve route (setup below) | minutes; one-time setup |
+| 2 bits | sieve route, on a server | tens of GB RAM, days |
+| reused nonce / modulo window / LCG nonces | just run it | closed-form, instant |
 
-Modulo-window inputs follow a similar curve: wider windows are easier, while
-narrow windows can require expensive BKZ passes. Supply `--modulo-omega` and
-`--modulo-bound` when those values are known.
+Not sure of the cost? `./build/ecdsa_nonce_recovery --dry-run --leaked-bits 2`
+prints the RAM/time estimate for your machine (no setup needed).
 
-Lattice reductions run serially. The linked reduction library changes shared
-process state during reduction, so concurrent reductions in one process are
-not safe. Set `ECDSA_FPLLL_STRATEGY` to override the pruning-strategy file; the
-program can continue with slower unpruned enumeration when it is unavailable.
+## Deep leakage (L ≤ 3): the sieve route
 
-## Testing
-
-Run the fast regression group after routine changes:
+The 2-3 bit cases need lattice sieving (g6k). Set it up once:
 
 ```bash
-ctest --test-dir build --output-on-failure \
-  -R '^(unit_tests|fplll_sanity|cli_validation)$'
+worker/bootstrap.sh                    # detects/builds g6k, writes worker/sieve-env.sh
+./build/ecdsa_nonce_recovery --check   # confirms the sieve route is ready
+./build/ecdsa_nonce_recovery -i data/leak.txt --method sieve --leaked-bits 3
 ```
 
-Run the focused differential and end-to-end checks separately:
+Or just use the Docker image, which has it prebuilt. The tool shows the cost
+estimate and warns before a heavy run; it never blocks you.
 
-```bash
-ctest --test-dir build --output-on-failure -R '^ecc_differential$'
-ctest --test-dir build --output-on-failure -R '^e2e_recovery$'
-```
+## More
 
-CI also performs a warning-gated release build and sanitizer checks. Local
-sanitizer builds are available through the `asan` CMake preset.
-
-## Project layout
-
-| Path | Responsibility |
-|---|---|
-| `src/lattice_solver.cpp` | Single-block and two-block lattice construction and reduction |
-| `src/bias_profiler.cpp` | MSB and LSB structure detection |
-| `src/recovery_engine.cpp` | Method selection, recovery orchestration, and candidate checks |
-| `src/verifier.cpp` | Independent ECDSA verification |
-| `src/secp256k1.cpp` | Elliptic-curve primitives |
-| `tests/` | Unit, CLI, differential, integration, and end-to-end checks |
-
-## Documentation
-
-[COMMANDS.md](COMMANDS.md) is the complete build, test, fixture-generation,
-runtime, option, and troubleshooting reference.
+- [COMMANDS.md](COMMANDS.md) — full CLI, options, fixtures, troubleshooting.
+- [worker/README.md](worker/README.md) — sieve worker internals and bootstrap.
 
 ## License
 
