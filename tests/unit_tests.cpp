@@ -677,6 +677,46 @@ void test_modulo_ehnp() {
 // hint via a single consecutive pair, the timestamp-ordered fallback (which is
 // what finally uses the Timestamp field), and the no-false-positive gate.
 // ---------------------------------------------------------------------
+static RecoveryResult engineRunExplicit(Telemetry& tel,
+        const std::vector<Signature>& s, const std::vector<Pair>& p, double t) {
+    RecoveryEngine e(tel);
+    return e.run(s, p, RecoveryMethod::AUTO, 0, t, DEFAULT_SAMPLING_SEED,
+                 mpz(0), mpz(0), mpz(0), mpz(0), 0.0, /*max_time_explicit=*/true);
+}
+
+void test_last_resort_stage() {
+    std::cout << "-- AUTO last-resort stage --\n";
+    const mpz d("0x1122334455667788112233445566778811223344556677881122334455667788");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    // Unbiased, uniform nonces WITH a pubkey: profiler = NONE, all cheap methods
+    // miss, so run() reaches the last-resort stage. With a tiny explicit budget
+    // it must bail fast (deadline honoured) and fail honestly.
+    std::mt19937_64 rng(0xabc);
+    std::vector<Signature> sigs;
+    for (size_t i = 1; i <= 20; ++i) {
+        mpz k = 0; for (int b = 0; b < 256; b += 32) { k <<= 32; k += (unsigned long)(rng() & 0xffffffffUL); }
+        k %= SECP256K1_N; if (k == 0) k = 1;
+        sigs.push_back(make_sig(d, mpz(7000 + (long)i), k, pubkey, i));
+    }
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(sigs, &tel);
+    auto t0 = std::chrono::steady_clock::now();
+    RecoveryResult res = engineRunExplicit(tel, sigs, pairs, 0.5);
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    check(!res.success, "unbiased input: honest failure through the last-resort stage");
+    check(secs < 20.0, "tiny explicit budget bounds the last-resort stage (<20s)");
+
+    // No pubkey: the stage must not run at all (pubkey gate). Reuse the same
+    // nonces but strip the pubkey; recovery still fails, and must not hang.
+    std::vector<Signature> nopk = sigs;
+    for (auto& s : nopk) s.pubkey = 0;
+    Telemetry tel2;
+    auto pairs2 = PairComputer::compute_pairs(nopk, &tel2);
+    RecoveryResult res2 = engineRunExplicit(tel2, nopk, pairs2, 0.5);
+    check(!res2.success, "no-pubkey input: honest failure, last-resort skipped");
+}
+
 void test_linear_nonce() {
     std::cout << "-- linearly-related (LCG) nonce recovery (Phase 6d) --\n";
     const mpz d("0x2f3e4d5c6b7a8998a7b6c5d4e3f201123456789abcdef0fedcba98765432100f");
@@ -1061,6 +1101,7 @@ int main() {
     test_modulo_ehnp();
     std::cout << "\n";
     test_linear_nonce();
+    test_last_resort_stage();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

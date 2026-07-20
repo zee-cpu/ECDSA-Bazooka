@@ -6,6 +6,7 @@
 #include "secp256k1.h"
 #include "sieve_estimator.h"
 #include "sieve_config.h"
+#include "last_resort.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -366,7 +367,8 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     const std::vector<Signature>& signatures,
     const BiasProfile& profile,
     size_t max_sigs,
-    const mpz& pubkey_hint
+    const mpz& pubkey_hint,
+    double worker_timeout_sec
 ) {
     sieve_config::ensure_env();  // pick up worker/sieve-env.sh if env not set
 
@@ -479,12 +481,17 @@ std::optional<mpz> RecoveryEngine::try_sieve(
         std::fclose(f);
     }
 
-    std::string cmd = py + " " + worker + " < " + tmpl + " 2>/dev/null";
     std::string out;
-    if (FILE* pipe = popen(cmd.c_str(), "r")) {
-        char buf[256];
-        while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
-        pclose(pipe);
+    if (worker_timeout_sec > 0.0) {
+        auto captured = sieve_config::run_worker_capture(py, worker, tmpl, worker_timeout_sec);
+        if (captured) out = *captured;
+    } else {
+        std::string cmd = py + " " + worker + " < " + tmpl + " 2>/dev/null";
+        if (FILE* pipe = popen(cmd.c_str(), "r")) {
+            char buf[256];
+            while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+            pclose(pipe);
+        }
     }
     unlink(tmpl);
 
@@ -589,7 +596,8 @@ RecoveryResult RecoveryEngine::run(
     const mpz& modulo_bound,
     const mpz& lcg_a,
     const mpz& lcg_b,
-    double msb_leaked_bits
+    double msb_leaked_bits,
+    bool max_time_explicit
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -739,9 +747,26 @@ RecoveryResult RecoveryEngine::run(
         bool dispatch_ok = dispatch_and_recover(profile, signatures, pairs, force_method, max_sigs, pubkey_hint, result);
 
         if (!dispatch_ok || !result.private_key) {
-            result.success = false;
-            tel_.recovery_complete = true;
-            return result;
+            // Last-resort stage: blindly attempt the routes AUTO otherwise skips
+            // (modulo/EHNP sweep + speculative deep-MSB sieve ladder), pubkey-gated.
+            std::optional<mpz> lr;
+            if (pubkey_hint > 1) {
+                tel_.time_budget_sec = last_resort::resolve_deadline(
+                    max_time_sec, max_time_explicit, tel_.elapsed_seconds());
+                lr = try_last_resort(signatures, pairs, pubkey_hint, max_sigs);
+            }
+            if (lr) {
+                result.private_key = *lr;
+                result.private_key_hex = utils::mpz_to_hex(*lr);
+                result.method_used = RecoveryMethod::AUTO;
+                result.signatures_used = pairs.size();
+                result.bias_profile.description = "last-resort recovery (blind modulo/sieve)";
+                // fall through to strict verification below
+            } else {
+                result.success = false;
+                tel_.recovery_complete = true;
+                return result;
+            }
         }
     }
 
