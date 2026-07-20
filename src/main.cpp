@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
     RecoveryMethod force_method = RecoveryMethod::AUTO;
     size_t max_sigs = 0;
     double max_time = 0.0;
+    bool max_time_explicit = false;
     bool verbose = true;
     bool quiet = false;
     bool allow_no_pubkey = false;
@@ -166,6 +167,7 @@ int main(int argc, char** argv) {
                     std::cerr << "Error: invalid --max-time value\n";
                     return 1;
                 }
+                max_time_explicit = true;
                 break;
             case 'v':
                 verbose = true;
@@ -343,7 +345,8 @@ int main(int argc, char** argv) {
         modulo_bound,
         lcg_a,
         lcg_b,
-        msb_leaked_bits
+        msb_leaked_bits,
+        max_time_explicit
     );
 
     // Stop renderer
