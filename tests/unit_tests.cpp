@@ -15,6 +15,7 @@
 #include "recovery_engine.h"
 #include "sieve_estimator.h"
 #include "sieve_config.h"
+#include "last_resort.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -526,6 +527,26 @@ void test_sieve_config() {
       check(!pw.good(), "g6k probe does not shell-execute an injected command"); }
 }
 
+void test_last_resort_helpers() {
+    std::cout << "-- last-resort helpers --\n";
+    using namespace last_resort;
+    // Deadline resolution (absolute seconds-from-start; 0 == unlimited).
+    check(resolve_deadline(0.0, false, 5.0) == 5.0 + DEFAULT_BUDGET_SEC, "no --max-time -> elapsed+600 fresh allowance");
+    check(resolve_deadline(0.0, true, 5.0) == 0.0, "explicit --max-time 0 -> unlimited");
+    check(resolve_deadline(120.0, true, 5.0) == 120.0, "explicit --max-time T -> absolute bound T");
+    check(resolve_deadline(120.0, true, 200.0) == 120.0, "past an explicit T: deadline stays T (stage no-ops)");
+    check(DEFAULT_BUDGET_SEC == 600.0, "default budget is 600s");
+
+    // Feasible ladder self-terminates at the machine RAM floor.
+    auto big = feasible_rungs({8, 512.0});   // huge RAM -> every rung fits
+    check(big.size() == sieve_ladder().size(), "512GB machine: all ladder rungs feasible");
+    auto tiny = feasible_rungs({4, 8.0});     // 8GB box -> only shallow rungs
+    check(!tiny.empty() && tiny.front() == 4.0, "8GB: shallowest rung (L=4) feasible");
+    check(tiny.size() < sieve_ladder().size(), "8GB: deep rungs pruned by RAM floor");
+    for (size_t i = 1; i < tiny.size(); ++i)
+        check(tiny[i] < tiny[i-1], "feasible rungs are shallow->deep (descending L)");
+}
+
 void test_sieve_estimator() {
     std::cout << "-- sieve cost estimator (g6k-free) --\n";
     sieve_estimator::MachineFacts m{4, 8.0};
@@ -1010,6 +1031,7 @@ int main() {
     test_per_signature_leaked_bits();
     std::cout << "\n";
     test_sieve_estimator();
+    test_last_resort_helpers();
     std::cout << "\n";
     test_sieve_config();
     std::cout << "\n";
