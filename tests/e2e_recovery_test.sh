@@ -114,6 +114,39 @@ echo "$run_out" | grep -q '\[FAILURE\]'
 check "unbiased data: reports FAILURE (no false positive)" "$?"
 
 echo
+echo "=== E2E: blind AUTO recovers a modulo-biased set via the last-resort stage ==="
+# omega=2^20 with a 16-bit window -> bound=2^4, matching the blind sweep's first
+# candidate {a=20,c=4}. NO -m/--modulo hint and NO -t: the profiler reports NONE,
+# the capped fallback fails, and the last-resort modulo sweep recovers. This
+# exercises the whole blind-auditor path and needs no g6k (modulo is a lattice).
+mf="$WORKDIR/modulo_blind.txt"
+gen_out=$(python3 "$GEN" --count 250 --bias modulo --bias-bits 16 --omega 1048576 \
+                --output "$mf" --seed 71 2>&1)
+gt=$(echo "$gen_out" | grep -oE '0x[0-9a-fA-F]+' | head -1)
+run_out=$(timeout 320 "$BINARY" -i "$mf" -m auto -q 2>&1)
+recovered=$(echo "$run_out" | grep -oE '^\s*d = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
+echo "$run_out" | grep -q '\[SUCCESS\]'
+check "blind AUTO modulo set: reports SUCCESS" "$?"
+if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; fi
+check "blind AUTO modulo set: recovered key matches ground truth (via last-resort)" "$match"
+
+echo
+if [ "${BAZOOKA_E2E_SLOW:-0}" = "1" ] && "$BINARY" --check 2>/dev/null | grep -qi 'sieve route.*ready'; then
+  echo "=== E2E [SLOW]: blind AUTO recovers a deep-MSB set via the sieve ladder ==="
+  # No --leaked-bits hint: the profiler can't detect L=3, so recovery comes from
+  # the last-resort sieve ladder. The L=3 rung is dim-89 (~1h) -- opt-in only.
+  sf="$WORKDIR/msb_deep.txt"
+  gen_out=$(python3 "$GEN" --count 90 --bias msb --bias-bits 3 --output "$sf" --seed 73 2>&1)
+  gt=$(echo "$gen_out" | grep -oE '0x[0-9a-fA-F]+' | head -1)
+  run_out=$(timeout 5400 "$BINARY" -i "$sf" -m auto -q 2>&1)
+  recovered=$(echo "$run_out" | grep -oE '^\s*d = 0x[0-9a-fA-F]+' | grep -oE '0x[0-9a-fA-F]+')
+  if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; fi
+  check "blind AUTO deep-MSB set: recovered via sieve ladder" "$match"
+else
+  echo "  [SKIP] deep-MSB sieve-ladder e2e (set BAZOOKA_E2E_SLOW=1 with g6k to run; ~1h)"
+fi
+
+echo
 if [ "$FAILS" -eq 0 ]; then
     echo "ALL E2E CHECKS PASSED"
     exit 0
