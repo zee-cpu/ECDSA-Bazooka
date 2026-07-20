@@ -20,6 +20,7 @@
 #include <cmath>
 #include <random>
 #include <thread>
+#include <chrono>
 #include <type_traits>
 #include <vector>
 #include <algorithm>
@@ -489,6 +490,27 @@ void test_per_signature_leaked_bits() {
         << "PubKey: " << pubkey.get_str(16) << "\nLeakedBits: 300\n\n"; }
     Telemetry t2; auto b = SignatureParser::parse_file(bad, &t2);
     check(b.empty(), "out-of-range LeakedBits (300) is rejected");
+}
+
+void test_bounded_worker() {
+    std::cout << "-- bounded worker spawn (capture + timeout) --\n";
+    // Capture path: `cat < file` echoes the file back.
+    const std::string in = "/tmp/bz_bounded_in.txt";
+    { std::ofstream f(in); f << "hello-worker\n"; }
+    auto ok = sieve_config::run_worker_capture("/bin/cat", "", in, 5.0);
+    check(ok.has_value() && ok->find("hello-worker") != std::string::npos,
+          "captures child stdout");
+
+    // Timeout path: `sleep 10` must be killed well under 10s and return nullopt.
+    auto t0 = std::chrono::steady_clock::now();
+    auto slow = sieve_config::run_worker_capture("/bin/sleep", "10", in, 1.0);
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    check(!slow.has_value(), "timed-out worker returns nullopt");
+    check(secs < 4.0, "timeout kills the child promptly (<4s for a 1s cap)");
+
+    // Spawn failure: a non-existent interpreter returns nullopt, no throw.
+    check(!sieve_config::run_worker_capture("/no/such/bin_xyz", "", in, 2.0).has_value(),
+          "missing interpreter -> nullopt");
 }
 
 void test_sieve_config() {
@@ -1034,6 +1056,7 @@ int main() {
     test_last_resort_helpers();
     std::cout << "\n";
     test_sieve_config();
+    test_bounded_worker();
     std::cout << "\n";
     test_modulo_ehnp();
     std::cout << "\n";

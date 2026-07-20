@@ -41,4 +41,13 @@ namespace sieve_config {
     // (returns false) if the probe does not finish promptly.
     bool python_has_g6k(const std::string& py, const std::string& pythonpath, const std::string& ld_library_path);
 
+    // Run `py [worker] < stdin_path` with NO shell (fork+execlp), capturing the
+    // child's stdout. Kills the child if it runs longer than timeout_sec
+    // (0 = unbounded). Returns captured stdout, or nullopt on spawn failure,
+    // timeout, or non-zero exit. Used to give sieve rungs a per-rung cap.
+    std::optional<std::string> run_worker_capture(const std::string& py,
+                                                  const std::string& worker,
+                                                  const std::string& stdin_path,
+                                                  double timeout_sec);
+
 } // namespace sieve_config

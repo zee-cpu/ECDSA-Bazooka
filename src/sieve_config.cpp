@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <csignal>
 #include <ctime>
+#include <chrono>
 
 namespace sieve_config {
 
@@ -126,6 +127,61 @@ bool python_has_g6k(const std::string& py, const std::string& pythonpath, const 
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);
     return false;
+}
+
+std::optional<std::string> run_worker_capture(const std::string& py,
+                                              const std::string& worker,
+                                              const std::string& stdin_path,
+                                              double timeout_sec) {
+    if (py.empty()) return std::nullopt;
+    int outpipe[2];
+    if (pipe(outpipe) != 0) return std::nullopt;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(outpipe[0]); close(outpipe[1]); return std::nullopt; }
+    if (pid == 0) {                       // child
+        dup2(outpipe[1], 1);              // stdout -> pipe
+        close(outpipe[0]); close(outpipe[1]);
+        int infd = open(stdin_path.c_str(), O_RDONLY);
+        if (infd >= 0) { dup2(infd, 0); close(infd); }
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, 2); close(devnull); }  // silence stderr
+        if (worker.empty())
+            execlp(py.c_str(), py.c_str(), static_cast<char*>(nullptr));
+        else
+            execlp(py.c_str(), py.c_str(), worker.c_str(), static_cast<char*>(nullptr));
+        _exit(127);                       // exec failed
+    }
+
+    close(outpipe[1]);                    // parent keeps the read end
+    std::string out;
+    char buf[512];
+    auto start = std::chrono::steady_clock::now();
+    bool timed_out = false;
+    int flags = fcntl(outpipe[0], F_GETFL, 0);
+    fcntl(outpipe[0], F_SETFL, flags | O_NONBLOCK);
+    for (;;) {
+        ssize_t n = read(outpipe[0], buf, sizeof(buf));
+        if (n > 0) { out.append(buf, static_cast<size_t>(n)); continue; }
+        int status = 0;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {                   // child done; drain any remainder
+            while ((n = read(outpipe[0], buf, sizeof(buf))) > 0) out.append(buf, (size_t)n);
+            close(outpipe[0]);
+            if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) return std::nullopt;
+            return out;
+        }
+        if (timeout_sec > 0.0) {
+            double el = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start).count();
+            if (el >= timeout_sec) { timed_out = true; break; }
+        }
+        struct timespec ts{0, 20 * 1000 * 1000};  // 20ms
+        nanosleep(&ts, nullptr);
+    }
+    if (timed_out) { kill(pid, SIGKILL); waitpid(pid, nullptr, 0); }
+    close(outpipe[0]);
+    return std::nullopt;
 }
 
 std::string check_report() {
