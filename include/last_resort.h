@@ -6,11 +6,22 @@
 // RecoveryEngine::try_last_resort method that uses them lives in last_resort.cpp.
 namespace last_resort {
 
-    // Default wall-clock budget (s) when the user passed no --max-time.
-    constexpr double DEFAULT_BUDGET_SEC = 600.0;
-    // Ceiling (s) for a single sieve rung under a *bounded* budget, so one
-    // optimistically-"feasible" deep rung can't swallow a large budget whole.
-    // Not applied under an unlimited budget.
+    // Cap (s) for the statistical bias profiler. Detection is cheap; with an
+    // unbounded budget it over-explores (heavy lattice work) for many minutes on
+    // data with no detectable bias, starving dispatch + last-resort. A missed
+    // detection merely routes to fallback/last-resort -- the safety net.
+    constexpr double PROFILER_CAP_SEC = 30.0;
+    // Cap (s) for the fallback heuristic that runs BEFORE last-resort, so it
+    // can't consume the budget last-resort needs. Fallback only runs when the
+    // profiler detected nothing -- it is a bounded last-ditch, and the deep work
+    // belongs to last-resort.
+    constexpr double FALLBACK_CAP_SEC = 90.0;
+    // Bounded budget (s) for the modulo/EHNP window sweep, so recover_modulo
+    // CONVERGES instead of over-exploring: with an unbounded budget the lattice
+    // escalates endlessly rather than resolving.
+    constexpr double MODULO_SWEEP_SEC = 300.0;
+    // Generous per-rung cap (s) for the speculative sieve ladder -- a deep dim-89
+    // rung legitimately runs ~1h. The ladder runs every RAM-feasible rung.
     constexpr double PER_RUNG_CEILING_SEC = 3600.0;
 
     // Candidate MSB leak widths, shallow->deep. A rung at L catches every true
@@ -20,13 +31,11 @@ namespace last_resort {
         return L;
     }
 
-    // Absolute deadline (seconds-from-recovery-start) the last-resort stage
-    // runs under; 0 == unlimited (matches Telemetry::time_budget_sec).
-    //  - no --max-time (explicit=false): fresh allowance, elapsed_sec + DEFAULT_BUDGET_SEC.
-    //  - explicit --max-time 0 (or <=0): unlimited (0).
-    //  - explicit --max-time T (>0): T, the whole-run absolute bound (so the
-    //    stage gets only the time remaining within T, and none if T is spent).
-    double resolve_deadline(double max_time_sec, bool max_time_explicit, double elapsed_sec);
+    // Absolute deadline for a bounded sub-stage: elapsed + stage_budget, clamped
+    // to overall_ceiling when that is set (> 0). overall_ceiling == 0 means "no
+    // overall limit" (the --max-time-unset / auditor case) -- the sub-stage still
+    // gets its own bounded stage_budget so the lattice methods converge.
+    double stage_deadline(double overall_ceiling, double elapsed, double stage_budget);
 
     // Ladder rungs whose estimated sieve DB fits this machine's RAM
     // (estimator feasible_here), shallow->deep.

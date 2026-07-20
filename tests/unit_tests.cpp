@@ -552,12 +552,12 @@ void test_sieve_config() {
 void test_last_resort_helpers() {
     std::cout << "-- last-resort helpers --\n";
     using namespace last_resort;
-    // Deadline resolution (absolute seconds-from-start; 0 == unlimited).
-    check(resolve_deadline(0.0, false, 5.0) == 5.0 + DEFAULT_BUDGET_SEC, "no --max-time -> elapsed+600 fresh allowance");
-    check(resolve_deadline(0.0, true, 5.0) == 0.0, "explicit --max-time 0 -> unlimited");
-    check(resolve_deadline(120.0, true, 5.0) == 120.0, "explicit --max-time T -> absolute bound T");
-    check(resolve_deadline(120.0, true, 200.0) == 120.0, "past an explicit T: deadline stays T (stage no-ops)");
-    check(DEFAULT_BUDGET_SEC == 600.0, "default budget is 600s");
+    // Sub-stage deadline: elapsed + stage_budget, clamped to the overall ceiling.
+    check(stage_deadline(0.0, 5.0, 90.0) == 95.0, "no ceiling -> elapsed + stage budget");
+    check(stage_deadline(200.0, 5.0, 90.0) == 95.0, "ceiling above -> unclamped");
+    check(stage_deadline(50.0, 5.0, 90.0) == 50.0, "ceiling below -> clamped to ceiling");
+    check(FALLBACK_CAP_SEC > 0.0 && MODULO_SWEEP_SEC > 0.0 && PER_RUNG_CEILING_SEC > 0.0,
+          "sub-stage budgets are positive");
 
     // Feasible ladder self-terminates at the machine RAM floor.
     auto big = feasible_rungs({8, 512.0});   // huge RAM -> every rung fits
