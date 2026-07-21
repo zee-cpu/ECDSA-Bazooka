@@ -62,7 +62,11 @@ std::optional<mpz> ransac_recover(
             size_t s = ransac_subset_size(L, pairs.size());
             if (pairs.size() < s) continue;
             // Deterministic per (seed, iter, L): a fixed input+seed reproduces
-            // the whole draw sequence and result (invariant 4).
+            // the whole draw sequence and result (invariant 4). Note: std::sample's
+            // selection order is implementation-defined, so reproducibility is
+            // guaranteed only within one toolchain/stdlib build (which is all
+            // invariant 4 requires); a stdlib change could shift which subsets are
+            // drawn -- never correctness (pubkey-gated), only the draw sequence.
             std::mt19937_64 rng(seed ^ (it * 0x9E3779B97F4A7C15ULL)
                                      ^ (static_cast<uint64_t>(L) << 1));
             std::vector<Pair> subset;

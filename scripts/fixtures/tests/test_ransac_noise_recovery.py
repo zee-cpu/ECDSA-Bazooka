@@ -34,4 +34,7 @@ def test_noise50_fails_gracefully(tmp_path):
     # confirms graceful failure without inflating the suite runtime.
     proc = subprocess.run([BINARY, "-i", str(txt_path), "-q", "-t", "90"],
                           capture_output=True, text=True, timeout=150)
-    assert "[SUCCESS]" not in (proc.stdout + proc.stderr)
+    out = proc.stdout + proc.stderr
+    # Make "never a wrong key" explicit: no success reported AND no key emitted.
+    assert "[SUCCESS]" not in out
+    assert _key(out) is None
