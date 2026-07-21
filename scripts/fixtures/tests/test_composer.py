@@ -50,3 +50,56 @@ def test_deterministic_same_seed_same_bytes():
     a = composer.build_case("fragmented", {"windows": [[0, 2], [128, 130]]}, 6, seed=105)
     b = composer.build_case("fragmented", {"windows": [[0, 2], [128, 130]]}, 6, seed=105)
     assert a == b
+
+def _labels(family, params, count, seed):
+    _, sc = composer.build_case(family, params, count, seed)
+    return sc["signatures"]
+
+def test_noisy_outlier_count_light_and_majority():
+    for frac, count in [(0.05, 800), (0.50, 200), (0.97, 300)]:
+        labels = _labels("noisy", {"L": 8, "outlier_frac": frac}, count, seed=201)
+        n_out = sum(1 for r in labels if r["is_outlier"])
+        assert n_out == round(frac * count)
+        for r in labels:
+            if r["is_outlier"]:
+                assert r["structure"] == "clean" and r["zero_windows"] == []
+            else:
+                assert r["structure"] == "msb" and r["leaked_bits"] == 8
+
+def test_partial_reuse_full_needle_shares_whole_nonce():
+    labels = _labels("partial_reuse", {"mode": "full", "groups": 3, "group_size": 2}, 2000, seed=202)
+    grouped = [r for r in labels if r["reuse_group"] is not None]
+    assert len(grouped) == 3 * 2
+    by_group = {}
+    for r in grouped:
+        by_group.setdefault(r["reuse_group"], []).append(r["nonce"])
+        assert r["shared_window"] == [0, 256]
+        assert r["structure"] == "reuse"
+    assert len(by_group) == 3
+    for nonces in by_group.values():
+        assert len(set(nonces)) == 1          # every member shares the whole nonce
+    # non-group nonces are all distinct
+    free = [r["nonce"] for r in labels if r["reuse_group"] is None]
+    assert len(set(free)) == len(free)
+
+def test_partial_reuse_shared_prefix_shares_top_bits():
+    P = 64
+    labels = _labels("partial_reuse", {"mode": "prefix", "prefix_bits": P}, 64, seed=203)
+    prefixes = {int(r["nonce"], 16) >> (256 - P) for r in labels}
+    assert len(prefixes) == 1                  # all share the same top-P bits
+    for r in labels:
+        assert r["shared_window"] == [256 - P, 256]
+        assert r["reuse_group"] == 0
+
+def test_mixed_msblsb_split_structures():
+    labels = _labels("mixed", {"mode": "msblsb", "L": 8}, 600, seed=204)
+    kinds = {r["structure"] for r in labels}
+    assert kinds == {"msb", "lsb"}
+    assert sum(1 for r in labels if r["structure"] == "msb") == 300
+
+def test_mixed_strength_varies_leaked_bits():
+    labels = _labels("mixed", {"mode": "strength", "lo": 4, "hi": 10}, 800, seed=205)
+    widths = {r["leaked_bits"] for r in labels}
+    assert widths.issubset(set(range(4, 11)))
+    assert len(widths) > 1                      # genuinely varied
+    assert all(r["structure"] == "msb" for r in labels)

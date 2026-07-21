@@ -57,9 +57,78 @@ def _nonces_uniform(family, params, count, rng):
             raise NotImplementedError(f"set-level family '{family}' arrives in Task 3")
     return out
 
+def _mixed(params, count, rng):
+    out = []
+    if params["mode"] == "msblsb":
+        L = params["L"]
+        for i in range(count):
+            if i < count // 2:
+                out.append(primitives.contiguous_msb(L, rng))
+            else:
+                out.append(primitives.contiguous_lsb(L, rng))
+    elif params["mode"] == "strength":
+        for _ in range(count):
+            L = rng.randint(params["lo"], params["hi"])
+            out.append(primitives.contiguous_msb(L, rng))
+    else:
+        raise ValueError(f"unknown mixed mode {params['mode']}")
+    return out
+
+def _noisy(params, count, rng):
+    n_out = round(params["outlier_frac"] * count)
+    out = []
+    for i in range(count):
+        if i < n_out:
+            k, label = primitives.clean(rng)
+            label["is_outlier"] = True
+        else:
+            k, label = primitives.contiguous_msb(params["L"], rng)
+        out.append((k, label))
+    return out
+
+def _partial_reuse(params, count, rng):
+    out = [primitives.clean(rng) for _ in range(count)]   # clean background
+    if params["mode"] == "full":
+        groups, size = params["groups"], params["group_size"]
+        idx = 0
+        for g in range(groups):
+            shared_k = rng.randrange(1, N)
+            for _ in range(size):
+                _, label = primitives.clean(rng)   # advance rng identically
+                label = {
+                    "nonce": hex(shared_k), "structure": "reuse", "leaked_bits": 0,
+                    "zero_windows": [], "reuse_group": g,
+                    "shared_window": [0, 256], "is_outlier": False,
+                }
+                out[idx] = (shared_k, label)
+                idx += 1
+    elif params["mode"] == "prefix":
+        P = params["prefix_bits"]
+        prefix = rng.randrange(1, N) >> (256 - P) << (256 - P)   # fixed top-P bits
+        for i in range(count):
+            low = rng.getrandbits(256 - P)
+            k = prefix | low
+            if k == 0:
+                k = 1
+            out[i] = (k, {
+                "nonce": hex(k), "structure": "reuse", "leaked_bits": 0,
+                "zero_windows": [], "reuse_group": 0,
+                "shared_window": [256 - P, 256], "is_outlier": False,
+            })
+    else:
+        raise ValueError(f"unknown partial_reuse mode {params['mode']}")
+    return out
+
 def _build_nonces(family, params, count, rng):
-    # Task 3 replaces this dispatch with mixed/noisy/partial_reuse branches.
-    return _nonces_uniform(family, params, count, rng)
+    if family in ("contiguous_msb", "contiguous_lsb", "modulo", "fragmented"):
+        return _nonces_uniform(family, params, count, rng)
+    if family == "mixed":
+        return _mixed(params, count, rng)
+    if family == "noisy":
+        return _noisy(params, count, rng)
+    if family == "partial_reuse":
+        return _partial_reuse(params, count, rng)
+    raise ValueError(f"unknown family {family}")
 
 def build_case(family, params, count, seed):
     rng = random.Random(seed)
@@ -83,6 +152,10 @@ def build_case(family, params, count, seed):
     if family == "modulo":
         out_params["omega"] = params["omega"]
         out_params["bound"] = params["bound"]
+    elif family == "noisy":
+        out_params["outlier_frac"] = params["outlier_frac"]
+    elif family == "partial_reuse":
+        out_params["reuse_groups"] = params.get("groups", 1)
 
     sidecar = {
         "schema_version": 1,
