@@ -45,6 +45,10 @@ public:
 
 private:
     Telemetry& tel_;
+    // Set by a last-resort rung on a verified hit so run() can label the result
+    // with the specific rung that recovered (empty -> the generic last-resort
+    // description). Cleared before each last-resort stage.
+    std::string last_resort_desc_;
 
     std::optional<mpz> try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
     std::optional<mpz> try_fallback_ladder(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
@@ -109,6 +113,15 @@ private:
         // capture helper so a single deep rung can't overrun the budget.
         double worker_timeout_sec = 0.0
     );
+
+    // Tier 1.2a: shared-prefix nonce reuse. A group sharing a fixed unknown
+    // nonce high-part leaves no single-nonce bias; differencing against a pivot
+    // cancels the shared part and yields a BV-HNP (see last_resort::
+    // shared_prefix_pairs). Sweeps candidate prefix widths x a few pivots, each
+    // one bounded LLL, pubkey-gated. Cheapest last-resort rung. Defined in
+    // last_resort.cpp.
+    std::optional<mpz> try_shared_prefix_reuse(
+        const std::vector<Pair>& pairs, const mpz& pubkey_hint);
 
     // AUTO last-resort stage: after every cheaper method has failed and a pubkey
     // is present, blindly attempt the modulo/EHNP window sweep, then a
