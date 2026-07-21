@@ -121,6 +121,24 @@ std::optional<mpz> RecoveryEngine::try_shared_prefix_reuse(
     return std::nullopt;
 }
 
+std::optional<mpz> RecoveryEngine::try_ransac_resample(
+    const std::vector<Pair>& pairs, const mpz& pubkey_hint) {
+    if (pubkey_hint <= 1) return std::nullopt;
+    if (pairs.size() < 24) return std::nullopt;
+    tel_.set_phase("last-resort: RANSAC resampling (outlier-robust)");
+    auto d = last_resort::ransac_recover(
+        pairs, pubkey_hint, tel_.sampling_seed.load(),
+        last_resort::RANSAC_MAX_ITERS, last_resort::ransac_l_candidates(), &tel_);
+    if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
+        tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);
+        tel_.method_chosen = true;
+        last_resort_desc_ = "outlier-robust RANSAC resampling (bias present in a "
+                            "subset amid non-biased outliers)";
+        return d;
+    }
+    return std::nullopt;
+}
+
 std::optional<mpz> RecoveryEngine::try_last_resort(
     const std::vector<Signature>& signatures,
     const std::vector<Pair>& pairs,
@@ -148,6 +166,19 @@ std::optional<mpz> RecoveryEngine::try_last_resort(
             overall_ceiling, tel_.elapsed_seconds(), last_resort::SHARED_PREFIX_CAP_SEC);
         tel_.set_status("last-resort: shared-prefix nonce reuse");
         auto d = try_shared_prefix_reuse(pairs, pubkey_hint);
+        if (verified(d)) return d;
+    }
+
+    // 0b. RANSAC resampling (Tier 1.3): outlier-robust. Draw random subsets
+    //     (small s minimizes outliers/draw) and pubkey-verify; profiler-
+    //     independent. Recovers light-moderate noise; heavy noise exhausts the
+    //     budget without a wrong key. Cheaper/more common than modulo, so first
+    //     among the lattice sweeps after shared-prefix.
+    if (!ceiling_hit()) {
+        tel_.time_budget_sec = last_resort::stage_deadline(
+            overall_ceiling, tel_.elapsed_seconds(), last_resort::RANSAC_CAP_SEC);
+        tel_.set_status("last-resort: RANSAC resampling");
+        auto d = try_ransac_resample(pairs, pubkey_hint);
         if (verified(d)) return d;
     }
 
