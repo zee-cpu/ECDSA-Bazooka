@@ -31,8 +31,13 @@ constexpr size_t TRAIN_M_CAP = 320;
 // uncapped). Measured, not assumed: across the Tier-0 FAST MSB/LSB corpus the
 // verified key's norm-rank never exceeded 0 (M1, scripts/measure_norm_rank.py),
 // and the capped no-pubkey scoring path recovers msb_L9_putty_58 and
-// msb_L8_tpmfail_1000 at this value (M2, test_nopubkey_capped.py). 128 leaves
-// generous headroom.
+// msb_L8_tpmfail_1000 at this value (M2, test_nopubkey_capped.py).
+// Caveat: every FAST-corpus recovery landed at norm-rank 0, so no case here
+// exercises depth > 0 -- 128 is therefore defensive headroom for the untested
+// weak-bias / high-dimension (dim ~300) regime this norm-ordering targets, not
+// headroom over a measured nonzero max. The per-failing-trial cost is bounded
+// (~128 extra candidate checks), so a generous cap matches the project's
+// thoroughness-over-speed directive.
 constexpr size_t TOP_N_ROWS = 128;
 
 namespace {

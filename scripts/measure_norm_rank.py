@@ -33,7 +33,6 @@ with tempfile.TemporaryDirectory() as td:
                                   capture_output=True, text=True, timeout=180)
             out = proc.stdout + proc.stderr
         except subprocess.TimeoutExpired:
-            out = ""
             print(f"{case.name:32s} TIMEOUT")
             continue
         d = re.search(r"d = 0x([0-9a-fA-F]+)", out)

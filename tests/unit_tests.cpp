@@ -274,6 +274,15 @@ void test_lattice_basis_construction() {
 // holds by construction -- so reduce_and_extract must recover the exact d
 // and record a valid norm-rank via the uncapped pubkey path.
 // ---------------------------------------------------------------------
+// Scope note: these tests use strong L=16 bias, where the key-encoding vector
+// is b_0 (norm-rank 0) -- M1 measured max rank 0 across the whole FAST corpus.
+// They prove recovery + determinism + rank telemetry, NOT the specific defect
+// norm-ordering fixes (a short vector buried past the cap in *basis* order at
+// weak-bias/high dim). That regime is not reproducible through this entry
+// point: reduce_and_extract runs the reduction itself before harvesting, so a
+// pre-baked adversarial post-reduction basis can't be injected -- after LLL,
+// b_0 genuinely is shortest. The fix rests on code inspection + M1's
+// does-not-regress evidence; see the design's testability tradeoff.
 void test_norm_ordered_harvest() {
     std::cout << "-- LatticeSolver::reduce_and_extract norm-ordered harvest --\n";
     mpz N = SECP256K1_N;
@@ -328,6 +337,10 @@ void test_norm_ordered_harvest() {
 // Same synthetic HNP construction as test_norm_ordered_harvest, just larger:
 // m=130 -> dim=131 > TOP_N_ROWS=128.
 // ---------------------------------------------------------------------
+// Proves the uncapped pubkey k0-harvest still recovers at dim (131) > TOP_N_ROWS
+// (128) -- i.e. non-regression at high dimension. Note it does NOT demonstrate
+// deep-rank harvest: at L=16 the key is still norm-rank 0, so the old
+// basis-order code would have found it too. See the scope note above.
 void test_norm_ordered_harvest_above_cap() {
     std::cout << "-- LatticeSolver::reduce_and_extract norm-ordered harvest (above TOP_N_ROWS cap) --\n";
     mpz N = SECP256K1_N;
