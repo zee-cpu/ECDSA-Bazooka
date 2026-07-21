@@ -11,6 +11,10 @@ worker/__pycache__/
 worker/.pytest_cache/
 *.so
 
+# Python bytecode / pytest caches (fixtures package and any other Python)
+__pycache__/
+.pytest_cache/
+
 # Generated signature fixtures -- regenerable via scripts/generate_mock_signatures.py,
 # not source. Kept out of the repo to stay lean.
 data/*.txt
