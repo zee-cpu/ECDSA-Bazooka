@@ -54,7 +54,7 @@ def _nonces_uniform(family, params, count, rng):
         elif family == "fragmented":
             out.append(primitives.fragmented(params["windows"], rng))
         else:
-            raise NotImplementedError(f"set-level family '{family}' arrives in Task 3")
+            raise ValueError(f"unknown uniform family {family}")
     return out
 
 def _mixed(params, count, rng):

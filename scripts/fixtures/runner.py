@@ -28,8 +28,8 @@ def write_case(case, out_dir):
     txt, js = generate(case)
     txt_path = out_dir / f"{case.name}.txt"
     json_path = out_dir / f"{case.name}.labels.json"
-    txt_path.write_text(txt)
-    json_path.write_text(js)
+    txt_path.write_text(txt, encoding="utf-8")
+    json_path.write_text(js, encoding="utf-8")
     return txt_path, json_path
 
 def main(argv=None):

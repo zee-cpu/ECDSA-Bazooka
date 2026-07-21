@@ -1,6 +1,5 @@
 import os
 import re
-import shutil
 import subprocess
 import pytest
 from fixtures import runner, catalog

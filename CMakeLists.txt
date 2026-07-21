@@ -140,16 +140,19 @@ add_test(
 )
 set_tests_properties(e2e_recovery PROPERTIES TIMEOUT 600)
 
-# Python fixtures package: TDD suite for the labeled corpus generator. Skips
-# itself if pytest or the `ecdsa` module is unavailable (mirrors ecc_differential).
-# BAZOOKA_BINARY lets the cross-parse test invoke the freshly built CLI; the
-# test self-skips when it is unset/missing.
+# Python fixtures package: TDD suite for the labeled corpus generator. The
+# run_fixtures_tests.py wrapper exits 77 (SKIP_RETURN_CODE) when pytest or the
+# `ecdsa` module is unavailable, so a box without the optional deps SKIPs rather
+# than FAILs -- mirroring ecc_differential's graceful self-skip. BAZOOKA_BINARY
+# lets the cross-parse test invoke the freshly built CLI; that test additionally
+# self-skips when the binary is unset/missing.
 add_test(
     NAME fixtures_tests
-    COMMAND python3 -m pytest fixtures/tests -q
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_fixtures_tests.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/scripts
 )
 set_tests_properties(fixtures_tests PROPERTIES
     TIMEOUT 300
+    SKIP_RETURN_CODE 77
     ENVIRONMENT "BAZOOKA_BINARY=$<TARGET_FILE:ecdsa_nonce_recovery>"
 )
