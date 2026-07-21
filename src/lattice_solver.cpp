@@ -27,11 +27,12 @@ using namespace fplll;
 // ceiling costs nothing when the budget is tight.
 constexpr size_t TRAIN_M_CAP = 320;
 
-// Harvest breadth for the NO-PUBKEY best-effort path only. The pubkey path is
-// uncapped (a verify is definitive and ~free next to a reduction), so this never
-// bounds a verifiable recovery. PROVISIONAL value -- finalized in Task 3 from the
-// Tier-0 FAST corpus measurements (M1 norm-rank distribution + M2 stripped-pubkey
-// validation). Do not treat this comment as "measured" until Task 3 updates it.
+// Harvest breadth for the NO-PUBKEY best-effort path only (the pubkey path is
+// uncapped). Measured, not assumed: across the Tier-0 FAST MSB/LSB corpus the
+// verified key's norm-rank never exceeded 0 (M1, scripts/measure_norm_rank.py),
+// and the capped no-pubkey scoring path recovers msb_L9_putty_58 and
+// msb_L8_tpmfail_1000 at this value (M2, test_nopubkey_capped.py). 128 leaves
+// generous headroom.
 constexpr size_t TOP_N_ROWS = 128;
 
 namespace {
