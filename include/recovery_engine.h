@@ -36,7 +36,11 @@ public:
         // sieving-with-predicate worker. May be fractional (e.g. 2.5 -> a per-
         // signature mix of the two bracketing bounds). 0 (default) leaves
         // behaviour unchanged.
-        double msb_leaked_bits = 0.0
+        double msb_leaked_bits = 0.0,
+        // When true, honour max_time_sec verbatim for the last-resort stage
+        // (0 == unlimited, the auditor case); when false (no --max-time), the
+        // stage uses last_resort::DEFAULT_BUDGET_SEC.
+        bool max_time_explicit = false
     );
 
 private:
@@ -99,6 +103,24 @@ private:
         const std::vector<Signature>& signatures,
         const BiasProfile& profile,
         size_t max_sigs,
-        const mpz& pubkey_hint
+        const mpz& pubkey_hint,
+        // Per-rung wall-clock cap for the worker subprocess (0 = unbounded,
+        // preserving the original popen path). > 0 routes through the bounded
+        // capture helper so a single deep rung can't overrun the budget.
+        double worker_timeout_sec = 0.0
     );
+
+    // AUTO last-resort stage: after every cheaper method has failed and a pubkey
+    // is present, blindly attempt the modulo/EHNP window sweep, then a
+    // speculative deep-MSB sieve ladder over every RAM-feasible rung. Each
+    // sub-stage gets its OWN bounded budget (so the lattice methods converge
+    // instead of over-exploring), all clamped to overall_ceiling when set
+    // (absolute seconds-from-start; 0 == no overall limit). Pubkey-gated;
+    // returns a verified key or nullopt. Defined in last_resort.cpp.
+    std::optional<mpz> try_last_resort(
+        const std::vector<Signature>& signatures,
+        const std::vector<Pair>& pairs,
+        const mpz& pubkey_hint,
+        size_t max_sigs,
+        double overall_ceiling);
 };

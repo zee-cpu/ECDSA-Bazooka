@@ -15,10 +15,12 @@
 #include "recovery_engine.h"
 #include "sieve_estimator.h"
 #include "sieve_config.h"
+#include "last_resort.h"
 #include <iostream>
 #include <cmath>
 #include <random>
 #include <thread>
+#include <chrono>
 #include <type_traits>
 #include <vector>
 #include <algorithm>
@@ -490,6 +492,27 @@ void test_per_signature_leaked_bits() {
     check(b.empty(), "out-of-range LeakedBits (300) is rejected");
 }
 
+void test_bounded_worker() {
+    std::cout << "-- bounded worker spawn (capture + timeout) --\n";
+    // Capture path: `cat < file` echoes the file back.
+    const std::string in = "/tmp/bz_bounded_in.txt";
+    { std::ofstream f(in); f << "hello-worker\n"; }
+    auto ok = sieve_config::run_worker_capture("/bin/cat", "", in, 5.0);
+    check(ok.has_value() && ok->find("hello-worker") != std::string::npos,
+          "captures child stdout");
+
+    // Timeout path: `sleep 10` must be killed well under 10s and return nullopt.
+    auto t0 = std::chrono::steady_clock::now();
+    auto slow = sieve_config::run_worker_capture("/bin/sleep", "10", in, 1.0);
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    check(!slow.has_value(), "timed-out worker returns nullopt");
+    check(secs < 4.0, "timeout kills the child promptly (<4s for a 1s cap)");
+
+    // Spawn failure: a non-existent interpreter returns nullopt, no throw.
+    check(!sieve_config::run_worker_capture("/no/such/bin_xyz", "", in, 2.0).has_value(),
+          "missing interpreter -> nullopt");
+}
+
 void test_sieve_config() {
     std::cout << "-- zero-config sieve env resolution --\n";
     const std::string p = "/tmp/test_sieve_env.sh";
@@ -524,6 +547,26 @@ void test_sieve_config() {
     (void)sieve_config::python_has_g6k("/no/such/py; touch /tmp/bz_g6k_probe_pwned", "", "");
     { std::ifstream pw("/tmp/bz_g6k_probe_pwned");
       check(!pw.good(), "g6k probe does not shell-execute an injected command"); }
+}
+
+void test_last_resort_helpers() {
+    std::cout << "-- last-resort helpers --\n";
+    using namespace last_resort;
+    // Sub-stage deadline: elapsed + stage_budget, clamped to the overall ceiling.
+    check(stage_deadline(0.0, 5.0, 90.0) == 95.0, "no ceiling -> elapsed + stage budget");
+    check(stage_deadline(200.0, 5.0, 90.0) == 95.0, "ceiling above -> unclamped");
+    check(stage_deadline(50.0, 5.0, 90.0) == 50.0, "ceiling below -> clamped to ceiling");
+    check(FALLBACK_CAP_SEC > 0.0 && MODULO_SWEEP_SEC > 0.0 && PER_RUNG_CEILING_SEC > 0.0,
+          "sub-stage budgets are positive");
+
+    // Feasible ladder self-terminates at the machine RAM floor.
+    auto big = feasible_rungs({8, 512.0});   // huge RAM -> every rung fits
+    check(big.size() == sieve_ladder().size(), "512GB machine: all ladder rungs feasible");
+    auto tiny = feasible_rungs({4, 8.0});     // 8GB box -> only shallow rungs
+    check(!tiny.empty() && tiny.front() == 4.0, "8GB: shallowest rung (L=4) feasible");
+    check(tiny.size() < sieve_ladder().size(), "8GB: deep rungs pruned by RAM floor");
+    for (size_t i = 1; i < tiny.size(); ++i)
+        check(tiny[i] < tiny[i-1], "feasible rungs are shallow->deep (descending L)");
 }
 
 void test_sieve_estimator() {
@@ -634,6 +677,46 @@ void test_modulo_ehnp() {
 // hint via a single consecutive pair, the timestamp-ordered fallback (which is
 // what finally uses the Timestamp field), and the no-false-positive gate.
 // ---------------------------------------------------------------------
+static RecoveryResult engineRunExplicit(Telemetry& tel,
+        const std::vector<Signature>& s, const std::vector<Pair>& p, double t) {
+    RecoveryEngine e(tel);
+    return e.run(s, p, RecoveryMethod::AUTO, 0, t, DEFAULT_SAMPLING_SEED,
+                 mpz(0), mpz(0), mpz(0), mpz(0), 0.0, /*max_time_explicit=*/true);
+}
+
+void test_last_resort_stage() {
+    std::cout << "-- AUTO last-resort stage --\n";
+    const mpz d("0x1122334455667788112233445566778811223344556677881122334455667788");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    // Unbiased, uniform nonces WITH a pubkey: profiler = NONE, all cheap methods
+    // miss, so run() reaches the last-resort stage. With a tiny explicit budget
+    // it must bail fast (deadline honoured) and fail honestly.
+    std::mt19937_64 rng(0xabc);
+    std::vector<Signature> sigs;
+    for (size_t i = 1; i <= 20; ++i) {
+        mpz k = 0; for (int b = 0; b < 256; b += 32) { k <<= 32; k += (unsigned long)(rng() & 0xffffffffUL); }
+        k %= SECP256K1_N; if (k == 0) k = 1;
+        sigs.push_back(make_sig(d, mpz(7000 + (long)i), k, pubkey, i));
+    }
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(sigs, &tel);
+    auto t0 = std::chrono::steady_clock::now();
+    RecoveryResult res = engineRunExplicit(tel, sigs, pairs, 0.5);
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    check(!res.success, "unbiased input: honest failure through the last-resort stage");
+    check(secs < 20.0, "tiny explicit budget bounds the last-resort stage (<20s)");
+
+    // No pubkey: the stage must not run at all (pubkey gate). Reuse the same
+    // nonces but strip the pubkey; recovery still fails, and must not hang.
+    std::vector<Signature> nopk = sigs;
+    for (auto& s : nopk) s.pubkey = 0;
+    Telemetry tel2;
+    auto pairs2 = PairComputer::compute_pairs(nopk, &tel2);
+    RecoveryResult res2 = engineRunExplicit(tel2, nopk, pairs2, 0.5);
+    check(!res2.success, "no-pubkey input: honest failure, last-resort skipped");
+}
+
 void test_linear_nonce() {
     std::cout << "-- linearly-related (LCG) nonce recovery (Phase 6d) --\n";
     const mpz d("0x2f3e4d5c6b7a8998a7b6c5d4e3f201123456789abcdef0fedcba98765432100f");
@@ -1010,12 +1093,15 @@ int main() {
     test_per_signature_leaked_bits();
     std::cout << "\n";
     test_sieve_estimator();
+    test_last_resort_helpers();
     std::cout << "\n";
     test_sieve_config();
+    test_bounded_worker();
     std::cout << "\n";
     test_modulo_ehnp();
     std::cout << "\n";
     test_linear_nonce();
+    test_last_resort_stage();
     std::cout << "\n";
     test_compressed_pubkey();
     std::cout << "\n";

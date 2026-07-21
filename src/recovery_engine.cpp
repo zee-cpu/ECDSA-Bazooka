@@ -6,6 +6,7 @@
 #include "secp256k1.h"
 #include "sieve_estimator.h"
 #include "sieve_config.h"
+#include "last_resort.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -366,7 +367,8 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     const std::vector<Signature>& signatures,
     const BiasProfile& profile,
     size_t max_sigs,
-    const mpz& pubkey_hint
+    const mpz& pubkey_hint,
+    double worker_timeout_sec
 ) {
     sieve_config::ensure_env();  // pick up worker/sieve-env.sh if env not set
 
@@ -479,12 +481,17 @@ std::optional<mpz> RecoveryEngine::try_sieve(
         std::fclose(f);
     }
 
-    std::string cmd = py + " " + worker + " < " + tmpl + " 2>/dev/null";
     std::string out;
-    if (FILE* pipe = popen(cmd.c_str(), "r")) {
-        char buf[256];
-        while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
-        pclose(pipe);
+    if (worker_timeout_sec > 0.0) {
+        auto captured = sieve_config::run_worker_capture(py, worker, tmpl, worker_timeout_sec);
+        if (captured) out = *captured;
+    } else {
+        std::string cmd = py + " " + worker + " < " + tmpl + " 2>/dev/null";
+        if (FILE* pipe = popen(cmd.c_str(), "r")) {
+            char buf[256];
+            while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+            pclose(pipe);
+        }
     }
     unlink(tmpl);
 
@@ -589,7 +596,8 @@ RecoveryResult RecoveryEngine::run(
     const mpz& modulo_bound,
     const mpz& lcg_a,
     const mpz& lcg_b,
-    double msb_leaked_bits
+    double msb_leaked_bits,
+    bool max_time_explicit
 ) {
     RecoveryResult result;
     auto start = std::chrono::steady_clock::now();
@@ -731,15 +739,52 @@ RecoveryResult RecoveryEngine::run(
             tel_.leaked_bits_est = static_cast<double>(known_bits);
             tel_.bias_type = static_cast<int>(BiasType::LSB);
         } else {
-            // Profile
+            // Profile. With an unbounded budget the statistical profiler
+            // over-explores (heavy lattice work) for minutes on data with no
+            // detectable bias, starving dispatch + last-resort. Cap it -- a
+            // missed detection merely routes to fallback/last-resort (the net).
             tel_.set_phase("Profiling bias");
+            double saved_budget = tel_.time_budget_sec;
+            double oc = max_time_explicit ? max_time_sec : 0.0;
+            tel_.time_budget_sec = last_resort::stage_deadline(
+                oc, tel_.elapsed_seconds(), last_resort::PROFILER_CAP_SEC);
             profile = BiasProfiler::profile(pairs, &tel_);
+            tel_.time_budget_sec = saved_budget;
+        }
+
+        // Overall time ceiling: an explicit --max-time bounds the WHOLE run;
+        // otherwise there is no overall limit (each stage is still individually
+        // bounded below). 0 == no overall limit.
+        double overall_ceiling = max_time_explicit ? max_time_sec : 0.0;
+        // Cap the fallback heuristic so it can't consume the budget the
+        // last-resort stage needs. Only when nothing was detected (dispatch will
+        // route to FALLBACK) and a pubkey is present (last-resort applies);
+        // detected biases route to SIEVE/LATTICE and keep the full budget.
+        if (pubkey_hint > 1 && !profile.bias_detected) {
+            tel_.time_budget_sec = last_resort::stage_deadline(
+                overall_ceiling, tel_.elapsed_seconds(), last_resort::FALLBACK_CAP_SEC);
         }
 
         bool dispatch_ok = dispatch_and_recover(profile, signatures, pairs, force_method, max_sigs, pubkey_hint, result);
 
-        if (!dispatch_ok || !result.private_key) {
+        // Run the last-resort stage unless dispatch already produced a
+        // pubkey-VERIFIED key. dispatch may leave an UNVERIFIED best-effort
+        // candidate in result.private_key (confirmed later by strict
+        // verification) -- that must not suppress last-resort.
+        bool dispatch_verified = dispatch_ok && result.private_key != 0 &&
+            pubkey_hint > 1 && utils::verify_pubkey(result.private_key, pubkey_hint);
+        if (!dispatch_verified && pubkey_hint > 1) {
+            if (auto lr = try_last_resort(signatures, pairs, pubkey_hint, max_sigs, overall_ceiling)) {
+                result.private_key = *lr;
+                result.private_key_hex = utils::mpz_to_hex(*lr);
+                result.method_used = RecoveryMethod::AUTO;
+                result.signatures_used = pairs.size();
+                result.bias_profile.description = "last-resort recovery (blind modulo/sieve)";
+            }
+        }
+        if (result.private_key == 0) {
             result.success = false;
+            result.verification_details = "No candidate produced";
             tel_.recovery_complete = true;
             return result;
         }
