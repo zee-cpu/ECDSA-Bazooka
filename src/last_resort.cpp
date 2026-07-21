@@ -21,6 +21,24 @@ std::vector<double> feasible_rungs(const sieve_estimator::MachineFacts& m) {
     return out;
 }
 
+std::vector<Pair> shared_prefix_pairs(
+    const std::vector<Pair>& pairs, size_t pivot, int prefix_bits) {
+    std::vector<Pair> out;
+    if (prefix_bits <= 0 || prefix_bits >= 256) return out;
+    if (pairs.size() < 5 || pivot >= pairs.size()) return out;  // pivot + >=4 rows
+    const mpz& N = SECP256K1_N;
+    mpz Bp = mpz(1) << (256 - prefix_bits);   // B' = 2^(256-P)
+    const Pair& piv = pairs[pivot];
+    out.reserve(pairs.size() - 1);
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        if (i == pivot) continue;
+        mpz X = (pairs[i].x - piv.x) % N; if (X < 0) X += N;
+        mpz W = (pairs[i].w - piv.w + Bp) % N; if (W < 0) W += N;
+        out.push_back(Pair{W, X});   // Pair{w, x}; source_index/known_low_value default
+    }
+    return out;
+}
+
 } // namespace last_resort
 
 std::optional<mpz> RecoveryEngine::try_last_resort(

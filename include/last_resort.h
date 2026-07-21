@@ -1,5 +1,6 @@
 #pragma once
 #include "sieve_estimator.h"
+#include "types.h"
 #include <vector>
 
 // Wiring for AUTO's last-resort stage. Pure helpers here are unit-tested; the
@@ -40,5 +41,28 @@ namespace last_resort {
     // Ladder rungs whose estimated sieve DB fits this machine's RAM
     // (estimator feasible_here), shallow->deep.
     std::vector<double> feasible_rungs(const sieve_estimator::MachineFacts& m);
+
+    // ---- Tier 1.2a: shared-prefix nonce reuse (differenced BV-HNP) ----
+    // Bounded budget (s) for the shared-prefix rung: a small (width x pivot)
+    // grid of one LLL each. Cheapest last-resort rung, so it runs first.
+    constexpr double SHARED_PREFIX_CAP_SEC = 120.0;
+    // Cap on signatures fed to the differenced lattice, to bound its dimension
+    // (strong sharing needs only a handful: m * P > 256).
+    constexpr size_t SHARED_PREFIX_MAX_SIGS = 64;
+    // Candidate shared-prefix widths P, strongest sharing first. Undershoot-safe
+    // (a smaller assumed P is a looser, still-correct bound), so a descending
+    // sweep never emits a wrong key. Tunable against the Tier-0 corpus.
+    inline const std::vector<int>& shared_prefix_widths() {
+        static const std::vector<int> P = {64, 48, 32, 24, 16};
+        return P;
+    }
+    // Pivot-difference `pairs` against index `pivot` and add the centering
+    // offset B' = 2^(256-prefix_bits) to each constant, yielding pairs that form
+    // a standard centered BV-HNP with leak (prefix_bits - 1) in the SAME unknown
+    // d (see the design's equivalence proof). Returns the m-1 differenced pairs
+    // (i != pivot), or empty if args are degenerate (too few sigs / bad pivot /
+    // prefix_bits out of (0,256)).
+    std::vector<Pair> shared_prefix_pairs(
+        const std::vector<Pair>& pairs, size_t pivot, int prefix_bits);
 
 } // namespace last_resort

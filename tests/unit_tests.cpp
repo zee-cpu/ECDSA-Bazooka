@@ -328,6 +328,75 @@ void test_norm_ordered_harvest() {
 }
 
 // ---------------------------------------------------------------------
+// Tier 1.2a: shared-prefix nonce reuse. A group of signatures whose nonces
+// share a fixed unknown top-P-bit value K (k_i = K + low_i) is differenced
+// against a pivot to cancel K, yielding a standard centered BV-HNP instance
+// (leak P-1) in the SAME unknown d once the +B' offset is added back. This
+// test synthesizes such an instance directly in HNP space and checks that
+// last_resort::shared_prefix_pairs's differenced construction recovers the
+// exact d via the existing (unmodified) lattice functions.
+// ---------------------------------------------------------------------
+void test_shared_prefix_construction() {
+    std::cout << "-- last_resort::shared_prefix_pairs differenced HNP recovery --\n";
+    mpz N = SECP256K1_N;
+    std::mt19937_64 rng(20260723);
+    std::uniform_int_distribution<uint64_t> dist;
+    auto rand_mpz = [&]() {
+        mpz v = ((mpz(dist(rng)) << 192) + (mpz(dist(rng)) << 128)
+                 + (mpz(dist(rng)) << 64) + dist(rng)) % N;
+        return v == 0 ? mpz(1) : v;
+    };
+
+    const int P = 64, m = 24;
+    mpz d = rand_mpz();
+    mpz pubkey = utils::compute_pubkey(d);
+    mpz Bp = mpz(1) << (256 - P);                 // B' = 2^192
+    mpz K  = (rand_mpz() >> (256 - P)) << (256 - P); // shared top-P-bit value
+
+    std::vector<Pair> pairs;
+    for (int i = 0; i < m; ++i) {
+        mpz low = rand_mpz() % Bp;                 // low_i in [0, B')
+        mpz k   = K + low;                         // shares the top P bits
+        mpz x   = rand_mpz();
+        mpz xd  = utils::mod_mul(x, d, N);
+        mpz w   = (k - xd) % N; if (w < 0) w += N; // k = w + x*d (mod n)
+        pairs.push_back({w, x});
+    }
+
+    // Recover at the true P via the differenced construction.
+    auto diff = last_resort::shared_prefix_pairs(pairs, 0, P);
+    check(diff.size() == static_cast<size_t>(m - 1),
+          "shared-prefix: differenced set has m-1 pairs");
+
+    fplll::ZZ_mat<mpz_t> basis; mpz scaling;
+    bool built = LatticeSolver::build_boneh_venkatesan_basis(diff, P - 1, basis, scaling);
+    check(built, "shared-prefix: differenced basis built");
+
+    Telemetry tel;
+    auto got = LatticeSolver::reduce_and_extract(basis, diff, &tel, 0, pubkey);
+    check(got.has_value() && *got == d, "shared-prefix: recovers exact d at true P");
+
+    // Undershoot safety: assume FEWER shared bits than true (P=48 < 64).
+    auto diff_u = last_resort::shared_prefix_pairs(pairs, 0, 48);
+    fplll::ZZ_mat<mpz_t> basis_u; mpz scaling_u;
+    check(LatticeSolver::build_boneh_venkatesan_basis(diff_u, 48 - 1, basis_u, scaling_u),
+          "shared-prefix: undershoot basis built");
+    Telemetry tel_u;
+    auto got_u = LatticeSolver::reduce_and_extract(basis_u, diff_u, &tel_u, 0, pubkey);
+    check(got_u.has_value() && *got_u == d,
+          "shared-prefix: undershoot (P=48) still recovers exact d");
+
+    // Determinism: identical construction + solve yields identical d.
+    auto diff_d = last_resort::shared_prefix_pairs(pairs, 0, P);
+    fplll::ZZ_mat<mpz_t> basis_d; mpz scaling_d;
+    LatticeSolver::build_boneh_venkatesan_basis(diff_d, P - 1, basis_d, scaling_d);
+    Telemetry tel_d;
+    auto got_d = LatticeSolver::reduce_and_extract(basis_d, diff_d, &tel_d, 0, pubkey);
+    check(got_d.has_value() && *got_d == *got,
+          "shared-prefix: deterministic across identical calls");
+}
+
+// ---------------------------------------------------------------------
 // Norm-ordered harvest ABOVE the TOP_N_ROWS cap (review fix, Task 1). Stage 1's
 // per-path cap (TOP_N_ROWS=128 ranks, no-pubkey only) does not apply on the
 // pubkey path, so recovery must still succeed at a dimension exceeding that
@@ -1197,6 +1266,8 @@ int main() {
     test_lattice_basis_construction();
     std::cout << "\n";
     test_norm_ordered_harvest();
+    std::cout << "\n";
+    test_shared_prefix_construction();
     std::cout << "\n";
     test_norm_ordered_harvest_above_cap();
     std::cout << "\n";
