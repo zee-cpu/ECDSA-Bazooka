@@ -774,12 +774,15 @@ RecoveryResult RecoveryEngine::run(
         bool dispatch_verified = dispatch_ok && result.private_key != 0 &&
             pubkey_hint > 1 && utils::verify_pubkey(result.private_key, pubkey_hint);
         if (!dispatch_verified && pubkey_hint > 1) {
+            last_resort_desc_.clear();
             if (auto lr = try_last_resort(signatures, pairs, pubkey_hint, max_sigs, overall_ceiling)) {
                 result.private_key = *lr;
                 result.private_key_hex = utils::mpz_to_hex(*lr);
                 result.method_used = RecoveryMethod::AUTO;
                 result.signatures_used = pairs.size();
-                result.bias_profile.description = "last-resort recovery (blind modulo/sieve)";
+                result.bias_profile.description = last_resort_desc_.empty()
+                    ? "last-resort recovery (blind modulo/sieve)"
+                    : last_resort_desc_;
             }
         }
         if (result.private_key == 0) {

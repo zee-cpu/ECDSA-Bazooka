@@ -68,6 +68,9 @@ std::optional<mpz> RecoveryEngine::try_shared_prefix_reuse(
             if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
                 tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);
                 tel_.method_chosen = true;
+                last_resort_desc_ =
+                    "shared-prefix nonce reuse -- differenced HNP (no "
+                    "lattice-detectable single-nonce bias)";
                 return d;
             }
         }

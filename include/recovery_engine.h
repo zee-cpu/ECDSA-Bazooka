@@ -45,6 +45,10 @@ public:
 
 private:
     Telemetry& tel_;
+    // Set by a last-resort rung on a verified hit so run() can label the result
+    // with the specific rung that recovered (empty -> the generic last-resort
+    // description). Cleared before each last-resort stage.
+    std::string last_resort_desc_;
 
     std::optional<mpz> try_lattice(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
     std::optional<mpz> try_fallback_ladder(const std::vector<Pair>& pairs, const BiasProfile& bias, size_t max_sigs, const mpz& pubkey_hint);
