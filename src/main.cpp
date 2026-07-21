@@ -394,6 +394,10 @@ int main(int argc, char** argv) {
         std::cout << "  Method: " << method_name(res.method_used) << "\n";
         std::cout << "  Runtime: " << std::fixed << std::setprecision(2) << res.runtime_seconds << "s\n";
         std::cout << "  Verification: " << res.verification_details << "\n";
+        if (telemetry.verified_row_norm_rank >= 0) {
+            std::cout << "  Norm-rank: " << telemetry.verified_row_norm_rank
+                      << " / " << telemetry.lattice_dim << "\n";
+        }
         return 0;
     } else {
         std::cout << "\n[FAILURE] No key recovered.\n";

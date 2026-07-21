@@ -269,6 +269,56 @@ void test_lattice_basis_construction() {
 }
 
 // ---------------------------------------------------------------------
+// Norm-ordered harvest (Tier 1.1a Task 1): synthesizes a genuine, strongly
+// MSB-biased HNP instance directly in HNP space -- k_i = w_i + x_i*d (mod N)
+// holds by construction -- so reduce_and_extract must recover the exact d
+// and record a valid norm-rank via the uncapped pubkey path.
+// ---------------------------------------------------------------------
+void test_norm_ordered_harvest() {
+    std::cout << "-- LatticeSolver::reduce_and_extract norm-ordered harvest --\n";
+    mpz N = SECP256K1_N;
+    std::mt19937_64 rng(20260721);
+    std::uniform_int_distribution<uint64_t> dist;
+    auto rand_mpz = [&]() {
+        mpz v = ((mpz(dist(rng)) << 192) + (mpz(dist(rng)) << 128)
+                 + (mpz(dist(rng)) << 64) + dist(rng)) % N;
+        return v == 0 ? mpz(1) : v;
+    };
+
+    // Strong MSB bias (L=16) resolves under plain LLL. m=30 -> dim=31.
+    const int L = 16, m = 30;
+    mpz d = rand_mpz();
+    mpz pubkey = utils::compute_pubkey(d);
+
+    std::vector<Pair> pairs;
+    for (int i = 0; i < m; ++i) {
+        mpz x = rand_mpz();
+        mpz k = rand_mpz() >> L;                 // top L bits zero
+        mpz xd = utils::mod_mul(x, d, N);
+        mpz w = (k - xd) % N; if (w < 0) w += N; // k = w + x*d (mod N)
+        pairs.push_back({w, x});
+    }
+
+    fplll::ZZ_mat<mpz_t> basis; mpz scaling;
+    bool built = LatticeSolver::build_boneh_venkatesan_basis(pairs, L, basis, scaling);
+    check(built, "norm-harvest: basis built");
+
+    Telemetry tel;
+    auto got = LatticeSolver::reduce_and_extract(basis, pairs, &tel, 0, pubkey);
+    check(got.has_value() && *got == d, "norm-harvest: recovers exact d via pubkey path");
+    check(tel.verified_row_norm_rank >= 0
+          && tel.verified_row_norm_rank < static_cast<int>(basis.get_rows()),
+          "norm-harvest: verified_row_norm_rank recorded within [0, dim)");
+
+    // Determinism (invariant 4): identical inputs -> identical result.
+    fplll::ZZ_mat<mpz_t> basis2; mpz scaling2;
+    LatticeSolver::build_boneh_venkatesan_basis(pairs, L, basis2, scaling2);
+    Telemetry tel2;
+    auto got2 = LatticeSolver::reduce_and_extract(basis2, pairs, &tel2, 0, pubkey);
+    check(got2.has_value() && *got2 == *got, "norm-harvest: deterministic across identical calls");
+}
+
+// ---------------------------------------------------------------------
 // secp256k1 curve membership (Phase 2 pubkey gate). A malformed, off-curve,
 // or out-of-field pubkey must never be accepted as a recovery target -- this
 // is the check that used to be entirely absent.
@@ -1083,6 +1133,8 @@ int main() {
     test_ecdsa_equation_verification();
     std::cout << "\n";
     test_lattice_basis_construction();
+    std::cout << "\n";
+    test_norm_ordered_harvest();
     std::cout << "\n";
     test_curve_membership();
     std::cout << "\n";
