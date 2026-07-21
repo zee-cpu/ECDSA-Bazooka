@@ -27,6 +27,19 @@ using namespace fplll;
 // ceiling costs nothing when the budget is tight.
 constexpr size_t TRAIN_M_CAP = 320;
 
+// Harvest breadth for the NO-PUBKEY best-effort path only (the pubkey path is
+// uncapped). Measured, not assumed: across the Tier-0 FAST MSB/LSB corpus the
+// verified key's norm-rank never exceeded 0 (M1, scripts/measure_norm_rank.py),
+// and the capped no-pubkey scoring path recovers msb_L9_putty_58 and
+// msb_L8_tpmfail_1000 at this value (M2, test_nopubkey_capped.py).
+// Caveat: every FAST-corpus recovery landed at norm-rank 0, so no case here
+// exercises depth > 0 -- 128 is therefore defensive headroom for the untested
+// weak-bias / high-dimension (dim ~300) regime this norm-ordering targets, not
+// headroom over a measured nonzero max. The per-failing-trial cost is bounded
+// (~128 extra candidate checks), so a generous cap matches the project's
+// thoroughness-over-speed directive.
+constexpr size_t TOP_N_ROWS = 128;
+
 namespace {
 
 // fplll's plain bkz_reduction(basis, block_size, flags) convenience call
@@ -264,57 +277,80 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
     mpz x0inv = utils::mod_inverse(pivot.x, N);
     if (x0inv == 0) return std::nullopt;
 
+    // ---- Norm-order the reduced rows, shortest first. LLL/BKZ do NOT emit rows
+    // sorted by norm (only b_0 is reliably shortest), so basis-order traversal can
+    // bury a short k_0-encoding vector past the harvest cap. Sorting by exact mpz
+    // squared norm -- stable, tiebroken on original row index -> fully
+    // deterministic (invariant 4) -- makes the harvest keep the SHORTEST vectors
+    // and lets the pubkey check hit the most likely rows first. ----
+    std::vector<mpz> row_norm2(dim);
+    for (int row = 0; row < dim; ++row) {
+        mpz acc(0), v;
+        for (int col = 0; col < dim; ++col) {
+            mpz_set(v.get_mpz_t(), basis[row][col].get_data());
+            acc += v * v;
+        }
+        row_norm2[row] = acc;
+    }
+    std::vector<int> order(dim);
+    for (int i = 0; i < dim; ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+                     [&](int a, int b) { return row_norm2[a] < row_norm2[b]; });
+
+    const bool have_pubkey = (pubkey_hint > 1);
     std::vector<mpz> candidates;
-    for (int row = 0; row < dim && candidates.size() < 60; ++row) {
+
+    // Push a candidate d (dedup + range guard). On the pubkey path, verify inline;
+    // on a hit, record the norm-rank and signal the caller to return immediately.
+    auto add_candidate = [&](const mpz& d_cand, int norm_rank) -> bool {
+        if (d_cand <= 1 || d_cand >= N - 1) return false;
+        for (const auto& c : candidates) if (c == d_cand) return false;  // dup
+        candidates.push_back(d_cand);
+        if (have_pubkey && utils::verify_pubkey(d_cand, pubkey_hint)) {
+            if (telemetry) telemetry->verified_row_norm_rank = norm_rank;
+            return true;   // verified -> caller returns d_cand
+        }
+        return false;
+    };
+
+    // Stage 1: k_0-column harvest, norm-ordered. Uncapped on the pubkey path
+    // (never truncate a verifiable key); capped at TOP_N_ROWS rows without a
+    // pubkey (no ground truth to early-return on).
+    for (int rank = 0; rank < dim; ++rank) {
+        if (!have_pubkey && rank >= static_cast<int>(TOP_N_ROWS)) break;
+        int row = order[rank];
         mpz raw;
         mpz_set(raw.get_mpz_t(), basis[row][k0_col].get_data());
         if (raw == 0) continue;
-
         for (int sign = 0; sign < 2; ++sign) {
             mpz k0 = sign == 0 ? raw : -raw;
-            k0 %= N;
-            if (k0 < 0) k0 += N;
-
-            mpz d_cand = (k0 - pivot.w) % N;
-            if (d_cand < 0) d_cand += N;
+            k0 %= N; if (k0 < 0) k0 += N;
+            mpz d_cand = (k0 - pivot.w) % N; if (d_cand < 0) d_cand += N;
             d_cand = utils::mod_mul(d_cand, x0inv, N);
-
-            if (d_cand <= 1 || d_cand >= N - 1) continue;
-            bool dup = false;
-            for (auto& c : candidates) if (c == d_cand) { dup = true; break; }
-            if (!dup) candidates.push_back(d_cand);
+            if (add_candidate(d_cand, rank)) return d_cand;
         }
     }
 
-    // Fallback: scan remaining cells too, in case useful structure landed
-    // somewhere other than the dedicated k_0 column (cheap insurance).
-    for (int row = 0; row < dim && candidates.size() < 90; ++row) {
-        for (int col = 0; col < dim && candidates.size() < 90; ++col) {
+    // Stage 2: cell-scan insurance -- non-k_0 cells taken directly as candidate d,
+    // in case useful structure landed off the dedicated column. Norm-ordered rows.
+    // BOUNDED by TOP_N_ROWS candidates on BOTH paths (best-effort insurance; an
+    // uncapped junk-cell scan at dim~300 would verify ~dim^2 values -- see the
+    // plan's Spec Refinements).
+    //
+    // Stage 2 gets its own TOP_N_ROWS-slot budget, independent of how many
+    // candidates Stage 1 already produced (Stage 1's rank cap does not bound
+    // candidate COUNT, so a shared size cap would starve this scan entirely).
+    const size_t cell_scan_limit = candidates.size() + TOP_N_ROWS;
+    for (int rank = 0; rank < dim && candidates.size() < cell_scan_limit; ++rank) {
+        int row = order[rank];
+        for (int col = 0; col < dim && candidates.size() < cell_scan_limit; ++col) {
             if (col == static_cast<int>(k0_col)) continue;
             mpz val;
             mpz_set(val.get_mpz_t(), basis[row][col].get_data());
             if (val == 0) continue;
             if (val < 0) val = -val;
             if (val >= N) val %= N;
-            if (val <= 1 || val >= N - 1) continue;
-            bool dup = false;
-            for (auto& c : candidates) if (c == val) { dup = true; break; }
-            if (!dup) candidates.push_back(val);
-        }
-    }
-
-    // If we know the target public key, verify every extracted candidate
-    // against it directly and return the first match. This is the real
-    // correctness check (one scalar-mult each, trivial next to the reduction
-    // just done), so it must take precedence over the leading-zero scoring
-    // heuristic below -- otherwise the correct key, if present but not the
-    // top-scoring candidate, would be thrown away here and never reach the
-    // engine's verification step, which only ever sees this one return value.
-    if (pubkey_hint > 1) {
-        for (const auto& cand : candidates) {
-            if (utils::verify_pubkey(cand, pubkey_hint)) {
-                return cand;
-            }
+            if (add_candidate(val, rank)) return val;
         }
     }
 

@@ -137,6 +137,12 @@ struct Telemetry {
     std::atomic<size_t> current_attempt{0};
     std::atomic<size_t> total_attempts{0};
 
+    // 0-based norm-rank of the reduced-basis row whose extracted candidate
+    // verified against the pubkey (-1 if no verified hit). Norm-ordering makes
+    // this the position in the shortest-first traversal -- recorded so the
+    // Tier-0 corpus can measure how deep candidate harvesting must reach.
+    std::atomic<int> verified_row_norm_rank{-1};
+
     // Which trial is currently running, for display alongside lattice_dim:
     // the leak-bit level (L, or LSB known-bit count) being attempted, and
     // the BKZ block size (0 for plain LLL trials, since block size only
@@ -213,6 +219,7 @@ struct Telemetry {
         total_attempts = 0;
         current_leak_l = 0;
         current_block_size = 0;
+        verified_row_norm_rank = -1;
         lattice_in_progress = false;
         verification_passed = false;
         recovery_complete = false;
