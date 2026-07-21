@@ -396,6 +396,43 @@ void test_shared_prefix_construction() {
           "shared-prefix: deterministic across identical calls");
 }
 
+void test_ransac_resample() {
+    std::cout << "-- last_resort::ransac_recover outlier-robust recovery --\n";
+    mpz N = SECP256K1_N;
+    std::mt19937_64 rng(20260724);
+    std::uniform_int_distribution<uint64_t> dist;
+    auto rand_mpz = [&]() {
+        mpz v = ((mpz(dist(rng)) << 192) + (mpz(dist(rng)) << 128)
+                 + (mpz(dist(rng)) << 64) + dist(rng)) % N;
+        return v == 0 ? mpz(1) : v;
+    };
+
+    const int L = 16, m = 48, n_out = 3;      // ~94% inliers, strong bias
+    mpz d = rand_mpz();
+    mpz pubkey = utils::compute_pubkey(d);
+    std::vector<Pair> pairs;
+    for (int i = 0; i < m; ++i) {
+        mpz x = rand_mpz();
+        mpz k = (i < n_out) ? rand_mpz()        // outlier: full-range nonce
+                            : (rand_mpz() >> L); // biased: top L bits zero
+        mpz xd = utils::mod_mul(x, d, N);
+        mpz w = (k - xd) % N; if (w < 0) w += N;
+        pairs.push_back({w, x});
+    }
+    std::shuffle(pairs.begin(), pairs.end(), rng);  // outliers not clustered
+
+    std::vector<int> Ls = {16};
+    auto got = last_resort::ransac_recover(pairs, pubkey, 12345ULL, 100, Ls, nullptr);
+    check(got.has_value() && *got == d, "ransac: recovers d from noisy instance");
+
+    auto got2 = last_resort::ransac_recover(pairs, pubkey, 12345ULL, 100, Ls, nullptr);
+    check(got2.has_value() && *got2 == *got, "ransac: deterministic across identical calls");
+
+    check(last_resort::ransac_subset_size(8, 800) == 40,  "ransac: subset size L=8 -> 40");
+    check(last_resort::ransac_subset_size(12, 800) == 29, "ransac: subset size L=12 -> 29");
+    check(last_resort::ransac_subset_size(16, 800) == 24, "ransac: subset size L=16 -> 24");
+}
+
 // ---------------------------------------------------------------------
 // Norm-ordered harvest ABOVE the TOP_N_ROWS cap (review fix, Task 1). Stage 1's
 // per-path cap (TOP_N_ROWS=128 ranks, no-pubkey only) does not apply on the
@@ -1268,6 +1305,8 @@ int main() {
     test_norm_ordered_harvest();
     std::cout << "\n";
     test_shared_prefix_construction();
+    std::cout << "\n";
+    test_ransac_resample();
     std::cout << "\n";
     test_norm_ordered_harvest_above_cap();
     std::cout << "\n";

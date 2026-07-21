@@ -114,6 +114,14 @@ private:
         double worker_timeout_sec = 0.0
     );
 
+    // Tier 1.3: outlier-robust RANSAC resampling. Biased signatures mixed with
+    // non-biased outliers defeat the profiler (Type NONE) and the prefix-trained
+    // lattice; this draws random subsets and pubkey-verifies (see
+    // last_resort::ransac_recover). Recovers light-moderate noise (<=~10-12%);
+    // heavy noise exhausts the budget without a wrong key. Defined in last_resort.cpp.
+    std::optional<mpz> try_ransac_resample(
+        const std::vector<Pair>& pairs, const mpz& pubkey_hint);
+
     // Tier 1.2a: shared-prefix nonce reuse. A group sharing a fixed unknown
     // nonce high-part leaves no single-nonce bias; differencing against a pivot
     // cancels the shared part and yields a BV-HNP (see last_resort::

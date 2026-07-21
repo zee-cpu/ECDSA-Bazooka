@@ -152,7 +152,11 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/scripts
 )
 set_tests_properties(fixtures_tests PROPERTIES
-    TIMEOUT 300
+    # Raised from 300s: the Tier 1.3 RANSAC e2e adds ~300s of real recovery
+    # (noise5/noise10 recover through the full AUTO fallback; heavy-noise negative
+    # check is bounded). The suite exercises actual lattice recoveries, so it is
+    # legitimately slow -- thoroughness over speed.
+    TIMEOUT 720
     SKIP_RETURN_CODE 77
     ENVIRONMENT "BAZOOKA_BINARY=$<TARGET_FILE:ecdsa_nonce_recovery>"
 )

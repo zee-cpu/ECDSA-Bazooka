@@ -2,6 +2,8 @@
 #include "sieve_estimator.h"
 #include "types.h"
 #include <vector>
+#include <optional>
+#include <cstdint>
 
 // Wiring for AUTO's last-resort stage. Pure helpers here are unit-tested; the
 // RecoveryEngine::try_last_resort method that uses them lives in last_resort.cpp.
@@ -64,5 +66,32 @@ namespace last_resort {
     // prefix_bits out of (0,256)).
     std::vector<Pair> shared_prefix_pairs(
         const std::vector<Pair>& pairs, size_t pivot, int prefix_bits);
+
+    // ---- Tier 1.3: RANSAC-style resampling for outlier robustness ----
+    // Bounded budget (s) for the RANSAC rung. noise5/noise10 resolve <60s at
+    // s=40 (probe); wide margin. Runs after shared-prefix, before modulo.
+    constexpr double RANSAC_CAP_SEC = 300.0;
+    // Iteration cap: noise5/noise10 hit by ~iter 34 (probe); margin for seed
+    // variance. The rung stops at the budget OR this cap, whichever comes first.
+    constexpr size_t RANSAC_MAX_ITERS = 150;
+    // Assumed MSB leak widths for resampled subsets. L too large fails to verify
+    // (discarded); L too small still recovers (undershoot-safe).
+    inline const std::vector<int>& ransac_l_candidates() {
+        static const std::vector<int> L = {8, 12};
+        return L;
+    }
+    // Subset size for assumed leak L over a pool of `pool` pairs. EMPIRICAL
+    // heuristic (probe): ~256/L (info-theoretic floor for an L-bit-leak HNP) + 8
+    // margin, clamped to [24, min(pool,64)]. Small s minimizes outliers per draw
+    // while still resolving the HNP; NOT a theoretical guarantee.
+    size_t ransac_subset_size(int L, size_t pool);
+    // Draw random s-subsets and solve the BV lattice on each, pubkey-gated, until
+    // a verified key is found or max_iters / the telemetry deadline is reached.
+    // Deterministic for a given (pairs, seed). tel may be null (unit tests): then
+    // there is no deadline and no status output.
+    std::optional<mpz> ransac_recover(
+        const std::vector<Pair>& pairs, const mpz& pubkey_hint,
+        uint64_t seed, size_t max_iters,
+        const std::vector<int>& l_candidates, Telemetry* tel);
 
 } // namespace last_resort
