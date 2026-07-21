@@ -330,9 +330,14 @@ std::optional<mpz> LatticeSolver::reduce_and_extract(
     // BOUNDED by TOP_N_ROWS candidates on BOTH paths (best-effort insurance; an
     // uncapped junk-cell scan at dim~300 would verify ~dim^2 values -- see the
     // plan's Spec Refinements).
-    for (int rank = 0; rank < dim && candidates.size() < TOP_N_ROWS; ++rank) {
+    //
+    // Stage 2 gets its own TOP_N_ROWS-slot budget, independent of how many
+    // candidates Stage 1 already produced (Stage 1's rank cap does not bound
+    // candidate COUNT, so a shared size cap would starve this scan entirely).
+    const size_t cell_scan_limit = candidates.size() + TOP_N_ROWS;
+    for (int rank = 0; rank < dim && candidates.size() < cell_scan_limit; ++rank) {
         int row = order[rank];
-        for (int col = 0; col < dim && candidates.size() < TOP_N_ROWS; ++col) {
+        for (int col = 0; col < dim && candidates.size() < cell_scan_limit; ++col) {
             if (col == static_cast<int>(k0_col)) continue;
             mpz val;
             mpz_set(val.get_mpz_t(), basis[row][col].get_data());

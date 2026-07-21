@@ -319,6 +319,55 @@ void test_norm_ordered_harvest() {
 }
 
 // ---------------------------------------------------------------------
+// Norm-ordered harvest ABOVE the TOP_N_ROWS cap (review fix, Task 1). Stage 1's
+// per-path cap (TOP_N_ROWS=128 ranks, no-pubkey only) does not apply on the
+// pubkey path, so recovery must still succeed at a dimension exceeding that
+// cap -- proving the uncapped pubkey k0 harvest actually reaches deep rows
+// rather than being silently bounded by TOP_N_ROWS somewhere else in the
+// pipeline (e.g. a shared candidate-count budget starving deeper ranks).
+// Same synthetic HNP construction as test_norm_ordered_harvest, just larger:
+// m=130 -> dim=131 > TOP_N_ROWS=128.
+// ---------------------------------------------------------------------
+void test_norm_ordered_harvest_above_cap() {
+    std::cout << "-- LatticeSolver::reduce_and_extract norm-ordered harvest (above TOP_N_ROWS cap) --\n";
+    mpz N = SECP256K1_N;
+    std::mt19937_64 rng(20260722);
+    std::uniform_int_distribution<uint64_t> dist;
+    auto rand_mpz = [&]() {
+        mpz v = ((mpz(dist(rng)) << 192) + (mpz(dist(rng)) << 128)
+                 + (mpz(dist(rng)) << 64) + dist(rng)) % N;
+        return v == 0 ? mpz(1) : v;
+    };
+
+    // Strong MSB bias (L=16), m=130 -> dim=131, above TOP_N_ROWS=128.
+    const int L = 16, m = 130;
+    mpz d = rand_mpz();
+    mpz pubkey = utils::compute_pubkey(d);
+
+    std::vector<Pair> pairs;
+    for (int i = 0; i < m; ++i) {
+        mpz x = rand_mpz();
+        mpz k = rand_mpz() >> L;                 // top L bits zero
+        mpz xd = utils::mod_mul(x, d, N);
+        mpz w = (k - xd) % N; if (w < 0) w += N; // k = w + x*d (mod N)
+        pairs.push_back({w, x});
+    }
+
+    fplll::ZZ_mat<mpz_t> basis; mpz scaling;
+    bool built = LatticeSolver::build_boneh_venkatesan_basis(pairs, L, basis, scaling);
+    check(built, "above-cap: basis built");
+    check(basis.get_rows() == m + 1 && basis.get_rows() > 128,
+          "above-cap: dim (131) exceeds TOP_N_ROWS (128)");
+
+    Telemetry tel;
+    auto got = LatticeSolver::reduce_and_extract(basis, pairs, &tel, 0, pubkey);
+    check(got.has_value() && *got == d, "above-cap: recovers exact d via uncapped pubkey path");
+    check(tel.verified_row_norm_rank >= 0
+          && tel.verified_row_norm_rank < static_cast<int>(basis.get_rows()),
+          "above-cap: verified_row_norm_rank recorded within [0, dim)");
+}
+
+// ---------------------------------------------------------------------
 // secp256k1 curve membership (Phase 2 pubkey gate). A malformed, off-curve,
 // or out-of-field pubkey must never be accepted as a recovery target -- this
 // is the check that used to be entirely absent.
@@ -1135,6 +1184,8 @@ int main() {
     test_lattice_basis_construction();
     std::cout << "\n";
     test_norm_ordered_harvest();
+    std::cout << "\n";
+    test_norm_ordered_harvest_above_cap();
     std::cout << "\n";
     test_curve_membership();
     std::cout << "\n";
