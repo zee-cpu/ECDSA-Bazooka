@@ -110,6 +110,15 @@ private:
         double worker_timeout_sec = 0.0
     );
 
+    // Tier 1.2a: shared-prefix nonce reuse. A group sharing a fixed unknown
+    // nonce high-part leaves no single-nonce bias; differencing against a pivot
+    // cancels the shared part and yields a BV-HNP (see last_resort::
+    // shared_prefix_pairs). Sweeps candidate prefix widths x a few pivots, each
+    // one bounded LLL, pubkey-gated. Cheapest last-resort rung. Defined in
+    // last_resort.cpp.
+    std::optional<mpz> try_shared_prefix_reuse(
+        const std::vector<Pair>& pairs, const mpz& pubkey_hint);
+
     // AUTO last-resort stage: after every cheaper method has failed and a pubkey
     // is present, blindly attempt the modulo/EHNP window sweep, then a
     // speculative deep-MSB sieve ladder over every RAM-feasible rung. Each

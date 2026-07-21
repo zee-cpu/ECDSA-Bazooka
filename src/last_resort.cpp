@@ -1,4 +1,5 @@
 #include "last_resort.h"
+#include "lattice_solver.h"
 #include "recovery_engine.h"
 #include "sieve_config.h"
 #include "utils.h"
@@ -41,6 +42,39 @@ std::vector<Pair> shared_prefix_pairs(
 
 } // namespace last_resort
 
+std::optional<mpz> RecoveryEngine::try_shared_prefix_reuse(
+    const std::vector<Pair>& pairs, const mpz& pubkey_hint) {
+    if (pubkey_hint <= 1) return std::nullopt;   // pubkey is the detector/gate
+    if (pairs.size() < 5) return std::nullopt;
+    tel_.set_phase("last-resort: shared-prefix nonce reuse (differenced HNP)");
+
+    size_t use = std::min(pairs.size(), last_resort::SHARED_PREFIX_MAX_SIGS);
+    std::vector<Pair> slice(pairs.begin(), pairs.begin() + use);
+    size_t max_pivots = std::min<size_t>(slice.size(), 3);
+
+    for (int P : last_resort::shared_prefix_widths()) {
+        if (tel_.deadline_exceeded()) break;
+        for (size_t piv = 0; piv < max_pivots; ++piv) {
+            if (tel_.deadline_exceeded()) break;
+            std::vector<Pair> diff = last_resort::shared_prefix_pairs(slice, piv, P);
+            if (diff.size() < 4) continue;
+            fplll::ZZ_mat<mpz_t> basis;
+            mpz scaling;
+            if (!LatticeSolver::build_boneh_venkatesan_basis(diff, P - 1, basis, scaling))
+                continue;   // pivot's differenced x not invertible; try next pivot
+            tel_.set_status("shared-prefix: P=" + std::to_string(P) +
+                            " pivot=" + std::to_string(piv));
+            auto d = LatticeSolver::reduce_and_extract(basis, diff, &tel_, 0, pubkey_hint);
+            if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
+                tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);
+                tel_.method_chosen = true;
+                return d;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<mpz> RecoveryEngine::try_last_resort(
     const std::vector<Signature>& signatures,
     const std::vector<Pair>& pairs,
@@ -57,6 +91,19 @@ std::optional<mpz> RecoveryEngine::try_last_resort(
     auto ceiling_hit = [&]() {
         return overall_ceiling > 0.0 && tel_.elapsed_seconds() >= overall_ceiling;
     };
+
+    // 0. Shared-prefix nonce reuse (Tier 1.2a): cheapest rung -- one LLL per
+    //    (width, pivot). A group sharing a fixed unknown nonce high-part is
+    //    invisible to the profiler and to repeated_nonce/LCG; the differenced
+    //    HNP exposes it. Runs first; short-circuits modulo/sieve on a verified
+    //    hit.
+    if (!ceiling_hit()) {
+        tel_.time_budget_sec = last_resort::stage_deadline(
+            overall_ceiling, tel_.elapsed_seconds(), last_resort::SHARED_PREFIX_CAP_SEC);
+        tel_.set_status("last-resort: shared-prefix nonce reuse");
+        auto d = try_shared_prefix_reuse(pairs, pubkey_hint);
+        if (verified(d)) return d;
+    }
 
     // 1. Modulo/EHNP window sweep, first. Given its OWN bounded budget so
     //    recover_modulo converges rather than over-exploring; it can't be
