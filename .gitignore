@@ -15,6 +15,10 @@ worker/.pytest_cache/
 # not source. Kept out of the repo to stay lean.
 data/*.txt
 
+# Generated labeled fixture corpus -- regenerable via scripts/fixtures/runner.py,
+# not source. Kept out of the repo (byte-deterministic; regenerate on demand).
+tests/fixtures/generated/
+
 # Local agent planning artifacts
 docs/superpowers/
 

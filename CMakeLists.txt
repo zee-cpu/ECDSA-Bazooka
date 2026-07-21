@@ -139,3 +139,17 @@ add_test(
             ${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_mock_signatures.py
 )
 set_tests_properties(e2e_recovery PROPERTIES TIMEOUT 600)
+
+# Python fixtures package: TDD suite for the labeled corpus generator. Skips
+# itself if pytest or the `ecdsa` module is unavailable (mirrors ecc_differential).
+# BAZOOKA_BINARY lets the cross-parse test invoke the freshly built CLI; the
+# test self-skips when it is unset/missing.
+add_test(
+    NAME fixtures_tests
+    COMMAND python3 -m pytest fixtures/tests -q
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/scripts
+)
+set_tests_properties(fixtures_tests PROPERTIES
+    TIMEOUT 300
+    ENVIRONMENT "BAZOOKA_BINARY=$<TARGET_FILE:ecdsa_nonce_recovery>"
+)
