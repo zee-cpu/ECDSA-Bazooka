@@ -434,6 +434,15 @@ void test_ransac_resample() {
     check(last_resort::ransac_subset_size(8, 800) == 40,  "ransac: subset size L=8 -> 40");
     check(last_resort::ransac_subset_size(12, 800) == 29, "ransac: subset size L=12 -> 29");
     check(last_resort::ransac_subset_size(16, 800) == 24, "ransac: subset size L=16 -> 24");
+
+    // Parallel pool recovery via ransac_work_unit + run_until_first.
+    std::vector<fork_pool::Work> pwork;
+    for (size_t it = 0; it < 60; ++it)
+        pwork.push_back(last_resort::ransac_work_unit(pairs, pubkey, 777ULL, it, 16));
+    auto par = fork_pool::run_until_first(pwork, 4, 60.0);
+    check(par.has_value() && *par == d, "ransac: parallel pool recovers exact d");
+    auto par2 = fork_pool::run_until_first(pwork, 4, 60.0);
+    check(par2.has_value() && *par2 == *par, "ransac: parallel result is the true key both runs");
 }
 
 // ---------------------------------------------------------------------

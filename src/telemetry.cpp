@@ -144,7 +144,7 @@ void TelemetryRenderer::stop() {
 
 void TelemetryRenderer::render_loop() {
     while (running_) {
-        render_once();
+        if (!tel_.render_paused_) render_once();
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
     }
 }
