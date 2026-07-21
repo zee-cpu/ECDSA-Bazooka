@@ -1329,6 +1329,15 @@ void test_fork_pool() {
     pid_t leftover3 = ::waitpid(-1, &st, WNOHANG);
     check(r3.has_value() && *r3 == mpz("abc", 16) && el3 < 5.0 && leftover3 <= 0,
           "fork_pool: run_until_first returns the winner and kills/reaps losers");
+
+    // 4. any_spawned: set true on a normal run that successfully forks a child,
+    //    regardless of that child's result (invariant 6 signal wiring).
+    bool any_spawned = false;
+    std::vector<fork_pool::Work> works4;
+    works4.push_back([]() -> std::optional<mpz> { return mpz("42", 16); });
+    auto r4 = fork_pool::run_until_first(works4, 1, 10.0, &any_spawned);
+    check(r4.has_value() && *r4 == mpz("42", 16) && any_spawned,
+          "fork_pool: run_until_first sets any_spawned=true on a successful spawn");
 }
 
 } // namespace

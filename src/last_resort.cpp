@@ -141,6 +141,11 @@ std::optional<mpz> RecoveryEngine::try_ransac_resample(
     if (pairs.size() < 24) return std::nullopt;
     tel_.set_phase("last-resort: RANSAC resampling (parallel, outlier-robust)");
 
+    double budget = tel_.remaining_budget_seconds();
+    if (budget <= 0.0) return std::nullopt;  // no budget left -> don't start
+                                              // (also: a negative deadline reads
+                                              // as "no deadline" to the pool)
+
     std::vector<fork_pool::Work> works;
     works.reserve(last_resort::RANSAC_MAX_ITERS * last_resort::ransac_l_candidates().size());
     uint64_t seed = tel_.sampling_seed.load();
@@ -150,13 +155,29 @@ std::optional<mpz> RecoveryEngine::try_ransac_resample(
 
     unsigned hw = std::thread::hardware_concurrency();
     size_t conc = hw ? hw : 1;
-    double budget = tel_.remaining_budget_seconds();
 
-    // Fork-safety: quiesce the render thread so it is not mid-malloc at any fork.
-    tel_.pause_rendering();
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let an in-flight render_once finish
-    auto d = fork_pool::run_until_first(works, conc, budget);
-    tel_.resume_rendering();
+    bool any_spawned = false;
+    std::optional<mpz> d;
+    {
+        // Fork-safety: quiesce the render thread so it is not mid-malloc at any
+        // fork. RAII guard so resume_rendering() always runs, even if the pool
+        // throws (e.g. bad_alloc).
+        struct RenderQuiesce {
+            Telemetry& t; explicit RenderQuiesce(Telemetry& tt): t(tt){ t.pause_rendering(); }
+            ~RenderQuiesce(){ t.resume_rendering(); }
+        } _rq(tel_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let an in-flight render_once finish
+        d = fork_pool::run_until_first(works, conc, budget, &any_spawned);
+    }
+
+    if (!d.has_value() && !any_spawned) {
+        // Forking unavailable (resource exhaustion) -> serial fallback so the
+        // RANSAC route is never silently skipped (invariant 6). The serial path
+        // is deadline-gated, so on a genuine no-recovery it is a near-no-op.
+        d = last_resort::ransac_recover(pairs, pubkey_hint, seed,
+                                        last_resort::RANSAC_MAX_ITERS,
+                                        last_resort::ransac_l_candidates(), &tel_);
+    }
 
     if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
         tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);

@@ -18,7 +18,9 @@ struct Child { pid_t pid; int fd; std::string buf; };
 }  // namespace
 
 std::optional<mpz> run_until_first(const std::vector<Work>& works,
-                                   size_t max_concurrent, double deadline_sec) {
+                                   size_t max_concurrent, double deadline_sec,
+                                   bool* any_spawned) {
+    if (any_spawned) *any_spawned = false;
     if (works.empty()) return std::nullopt;
     if (max_concurrent < 1) max_concurrent = 1;
     std::vector<Child> live;
@@ -32,6 +34,7 @@ std::optional<mpz> run_until_first(const std::vector<Work>& works,
         if (pid < 0) { close(pp[0]); close(pp[1]); return; }
         if (pid == 0) {                       // child: run the work-unit, pipe key hex
             close(pp[0]);
+            for (auto& c : live) close(c.fd);  // close inherited sibling read-ends
             std::optional<mpz> r = works[idx]();
             std::string s = r.has_value() ? r->get_str(16) : "";
             ssize_t w = write(pp[1], s.data(), s.size()); (void)w;
@@ -42,12 +45,22 @@ std::optional<mpz> run_until_first(const std::vector<Work>& works,
         int fl = fcntl(pp[0], F_GETFL, 0);
         fcntl(pp[0], F_SETFL, fl | O_NONBLOCK);
         live.push_back({pid, pp[0], std::string()});
+        if (any_spawned) *any_spawned = true;
     };
 
     auto reap_all = [&]() {
         for (auto& c : live) { kill(c.pid, SIGKILL); waitpid(c.pid, nullptr, 0); close(c.fd); }
         live.clear();
     };
+
+    // Reap-on-throw: if the loop below ever throws (e.g. bad_alloc from a
+    // std::string/vector op) the destructor still reaps every live child.
+    // reap_all() clears `live`, so a second call (from a normal exit path
+    // below) is a no-op.
+    struct ReapGuard {
+        decltype(reap_all)& fn;
+        ~ReapGuard() { fn(); }
+    } reap_guard{reap_all};
 
     while (live.size() < max_concurrent && next < works.size()) spawn(next++);
 
