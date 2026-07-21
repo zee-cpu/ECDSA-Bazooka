@@ -37,6 +37,7 @@ add_library(ecdsa_recovery_core STATIC
     src/sieve_estimator.cpp
     src/sieve_config.cpp
     src/last_resort.cpp
+    src/fork_pool.cpp
 )
 
 target_include_directories(ecdsa_recovery_core PUBLIC

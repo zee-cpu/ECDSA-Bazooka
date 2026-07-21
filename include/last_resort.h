@@ -1,6 +1,7 @@
 #pragma once
 #include "sieve_estimator.h"
 #include "types.h"
+#include "fork_pool.h"
 #include <vector>
 #include <optional>
 #include <cstdint>
@@ -93,5 +94,13 @@ namespace last_resort {
         const std::vector<Pair>& pairs, const mpz& pubkey_hint,
         uint64_t seed, size_t max_iters,
         const std::vector<int>& l_candidates, Telemetry* tel);
+
+    // Work-unit for RANSAC iteration `iter`, leak `L`: sample a seeded subset,
+    // build the BV lattice, reduce+extract, and return a pubkey-verified key or
+    // nullopt. Shared by the serial (ransac_recover) and parallel (pool) paths so
+    // both draw identical, deterministic subsets from (seed, iter, L).
+    fork_pool::Work ransac_work_unit(const std::vector<Pair>& pairs,
+                                     const mpz& pubkey_hint, uint64_t seed,
+                                     size_t iter, int L);
 
 } // namespace last_resort

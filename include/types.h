@@ -166,6 +166,12 @@ struct Telemetry {
     // reproduced exactly.
     std::atomic<uint64_t> sampling_seed{DEFAULT_SAMPLING_SEED};
 
+    // Fork-safety: set true to make the render thread idle (no malloc/IO) so the
+    // process is effectively single-threaded across a fork-pool section.
+    std::atomic<bool> render_paused_{false};
+    void pause_rendering()  { render_paused_ = true; }
+    void resume_rendering() { render_paused_ = false; }
+
     double elapsed_seconds() const {
         std::lock_guard<std::mutex> lock(str_mutex);
         return std::chrono::duration<double>(
@@ -223,6 +229,7 @@ struct Telemetry {
         lattice_in_progress = false;
         verification_passed = false;
         recovery_complete = false;
+        render_paused_ = false;
         {
             std::lock_guard<std::mutex> lock(str_mutex);
             current_phase.clear();

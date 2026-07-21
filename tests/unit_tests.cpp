@@ -16,6 +16,7 @@
 #include "sieve_estimator.h"
 #include "sieve_config.h"
 #include "last_resort.h"
+#include "fork_pool.h"
 #include <iostream>
 #include <cmath>
 #include <random>
@@ -24,6 +25,8 @@
 #include <type_traits>
 #include <vector>
 #include <algorithm>
+#include <unistd.h>
+#include <sys/wait.h>
 
 namespace {
 
@@ -431,6 +434,15 @@ void test_ransac_resample() {
     check(last_resort::ransac_subset_size(8, 800) == 40,  "ransac: subset size L=8 -> 40");
     check(last_resort::ransac_subset_size(12, 800) == 29, "ransac: subset size L=12 -> 29");
     check(last_resort::ransac_subset_size(16, 800) == 24, "ransac: subset size L=16 -> 24");
+
+    // Parallel pool recovery via ransac_work_unit + run_until_first.
+    std::vector<fork_pool::Work> pwork;
+    for (size_t it = 0; it < 60; ++it)
+        pwork.push_back(last_resort::ransac_work_unit(pairs, pubkey, 777ULL, it, 16));
+    auto par = fork_pool::run_until_first(pwork, 4, 60.0);
+    check(par.has_value() && *par == d, "ransac: parallel pool recovers exact d");
+    auto par2 = fork_pool::run_until_first(pwork, 4, 60.0);
+    check(par2.has_value() && *par2 == *par, "ransac: parallel result is the true key both runs");
 }
 
 // ---------------------------------------------------------------------
@@ -1285,6 +1297,49 @@ void test_ec_point_arithmetic() {
     check(scalar_mult(N, G).infinity, "n*G == O");
 }
 
+void test_fork_pool() {
+    std::cout << "-- fork_pool: process-isolated reduction primitive --\n";
+    // 1. round-trip: child returns an mpz -> fork_reduce returns exactly it.
+    auto r1 = fork_pool::fork_reduce([]() -> std::optional<mpz> {
+        return mpz("123456789abcdef", 16); }, 10.0);
+    check(r1.has_value() && *r1 == mpz("123456789abcdef", 16),
+          "fork_pool: fork_reduce round-trips a child result");
+
+    // 2. kill-on-timeout: a child that sleeps past the timeout is killed, nullopt.
+    auto t0 = std::chrono::steady_clock::now();
+    auto r2 = fork_pool::fork_reduce([]() -> std::optional<mpz> {
+        ::sleep(30); return mpz(1); }, 0.5);
+    double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    int st; pid_t leftover = ::waitpid(-1, &st, WNOHANG);
+    check(!r2.has_value() && el < 3.0 && leftover <= 0,
+          "fork_pool: fork_reduce kills on timeout and reaps (no zombie)");
+
+    // 3. run_until_first: one unit returns a value (others sleep) -> that value,
+    //    promptly, and all children reaped.
+    std::vector<fork_pool::Work> works;
+    for (int i = 0; i < 4; ++i) {
+        works.push_back([i]() -> std::optional<mpz> {
+            if (i == 2) return mpz("abc", 16);
+            ::sleep(30); return std::nullopt;
+        });
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    auto r3 = fork_pool::run_until_first(works, 4, 20.0);
+    double el3 = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+    pid_t leftover3 = ::waitpid(-1, &st, WNOHANG);
+    check(r3.has_value() && *r3 == mpz("abc", 16) && el3 < 5.0 && leftover3 <= 0,
+          "fork_pool: run_until_first returns the winner and kills/reaps losers");
+
+    // 4. any_spawned: set true on a normal run that successfully forks a child,
+    //    regardless of that child's result (invariant 6 signal wiring).
+    bool any_spawned = false;
+    std::vector<fork_pool::Work> works4;
+    works4.push_back([]() -> std::optional<mpz> { return mpz("42", 16); });
+    auto r4 = fork_pool::run_until_first(works4, 1, 10.0, &any_spawned);
+    check(r4.has_value() && *r4 == mpz("42", 16) && any_spawned,
+          "fork_pool: run_until_first sets any_spawned=true on a successful spawn");
+}
+
 } // namespace
 
 int main() {
@@ -1336,6 +1391,8 @@ int main() {
     test_telemetry_timing();
     std::cout << "\n";
     test_ec_point_arithmetic();
+    std::cout << "\n";
+    test_fork_pool();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

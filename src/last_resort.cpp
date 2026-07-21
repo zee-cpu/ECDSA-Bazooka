@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <random>
 #include <string>
+#include <thread>
+#include <chrono>
 
 namespace last_resort {
 
@@ -48,6 +50,35 @@ size_t ransac_subset_size(int L, size_t pool) {
     return static_cast<size_t>(std::clamp(base, lo, hi));
 }
 
+fork_pool::Work ransac_work_unit(const std::vector<Pair>& pairs,
+                                 const mpz& pubkey_hint, uint64_t seed,
+                                 size_t iter, int L) {
+    return [&pairs, pubkey_hint, seed, iter, L]() -> std::optional<mpz> {
+        size_t s = ransac_subset_size(L, pairs.size());
+        if (pairs.size() < s) return std::nullopt;
+        // Deterministic per (seed, iter, L): a fixed input+seed reproduces
+        // the whole draw sequence and result (invariant 4). Note: std::sample's
+        // selection order is implementation-defined, so reproducibility is
+        // guaranteed only within one toolchain/stdlib build (which is all
+        // invariant 4 requires); a stdlib change could shift which subsets are
+        // drawn -- never correctness (pubkey-gated), only the draw sequence.
+        std::mt19937_64 rng(seed ^ (iter * 0x9E3779B97F4A7C15ULL)
+                                 ^ (static_cast<uint64_t>(L) << 1));
+        std::vector<Pair> subset;
+        subset.reserve(s);
+        std::sample(pairs.begin(), pairs.end(), std::back_inserter(subset), s, rng);
+        fplll::ZZ_mat<mpz_t> basis;
+        mpz scaling;
+        if (!LatticeSolver::build_boneh_venkatesan_basis(subset, L, basis, scaling))
+            return std::nullopt;
+        auto d = LatticeSolver::reduce_and_extract(basis, subset, nullptr, 0, pubkey_hint);
+        if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) return d;
+        return std::nullopt;
+    };
+}
+// Note: capturing `pairs` by reference is safe in the forked child -- it reads
+// the child's COW copy of parent memory. `pubkey_hint` (mpz) is captured by value.
+
 std::optional<mpz> ransac_recover(
     const std::vector<Pair>& pairs, const mpz& pubkey_hint,
     uint64_t seed, size_t max_iters,
@@ -59,29 +90,8 @@ std::optional<mpz> ransac_recover(
         if (tel) tel->set_status("RANSAC resample iter " + std::to_string(it + 1));
         for (size_t li = 0; li < l_candidates.size(); ++li) {
             int L = l_candidates[li];
-            size_t s = ransac_subset_size(L, pairs.size());
-            if (pairs.size() < s) continue;
-            // Deterministic per (seed, iter, L): a fixed input+seed reproduces
-            // the whole draw sequence and result (invariant 4). Note: std::sample's
-            // selection order is implementation-defined, so reproducibility is
-            // guaranteed only within one toolchain/stdlib build (which is all
-            // invariant 4 requires); a stdlib change could shift which subsets are
-            // drawn -- never correctness (pubkey-gated), only the draw sequence.
-            std::mt19937_64 rng(seed ^ (it * 0x9E3779B97F4A7C15ULL)
-                                     ^ (static_cast<uint64_t>(L) << 1));
-            std::vector<Pair> subset;
-            subset.reserve(s);
-            std::sample(pairs.begin(), pairs.end(),
-                        std::back_inserter(subset), s, rng);
-            fplll::ZZ_mat<mpz_t> basis;
-            mpz scaling;
-            if (!LatticeSolver::build_boneh_venkatesan_basis(subset, L, basis, scaling))
-                continue;
-            // nullptr telemetry to reduce_and_extract: avoid churning per-iter
-            // telemetry 2*max_iters times; the deadline/status live in this loop.
-            auto d = LatticeSolver::reduce_and_extract(basis, subset, nullptr, 0, pubkey_hint);
-            if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint))
-                return d;
+            auto d = ransac_work_unit(pairs, pubkey_hint, seed, it, L)();
+            if (d.has_value()) return d;
         }
     }
     return std::nullopt;
@@ -129,15 +139,50 @@ std::optional<mpz> RecoveryEngine::try_ransac_resample(
     const std::vector<Pair>& pairs, const mpz& pubkey_hint) {
     if (pubkey_hint <= 1) return std::nullopt;
     if (pairs.size() < 24) return std::nullopt;
-    tel_.set_phase("last-resort: RANSAC resampling (outlier-robust)");
-    auto d = last_resort::ransac_recover(
-        pairs, pubkey_hint, tel_.sampling_seed.load(),
-        last_resort::RANSAC_MAX_ITERS, last_resort::ransac_l_candidates(), &tel_);
+    tel_.set_phase("last-resort: RANSAC resampling (parallel, outlier-robust)");
+
+    double budget = tel_.remaining_budget_seconds();
+    if (budget <= 0.0) return std::nullopt;  // no budget left -> don't start
+                                              // (also: a negative deadline reads
+                                              // as "no deadline" to the pool)
+
+    std::vector<fork_pool::Work> works;
+    works.reserve(last_resort::RANSAC_MAX_ITERS * last_resort::ransac_l_candidates().size());
+    uint64_t seed = tel_.sampling_seed.load();
+    for (size_t it = 0; it < last_resort::RANSAC_MAX_ITERS; ++it)
+        for (int L : last_resort::ransac_l_candidates())
+            works.push_back(last_resort::ransac_work_unit(pairs, pubkey_hint, seed, it, L));
+
+    unsigned hw = std::thread::hardware_concurrency();
+    size_t conc = hw ? hw : 1;
+
+    bool any_spawned = false;
+    std::optional<mpz> d;
+    {
+        // Fork-safety: quiesce the render thread so it is not mid-malloc at any
+        // fork. RAII guard so resume_rendering() always runs, even if the pool
+        // throws (e.g. bad_alloc).
+        struct RenderQuiesce {
+            Telemetry& t; explicit RenderQuiesce(Telemetry& tt): t(tt){ t.pause_rendering(); }
+            ~RenderQuiesce(){ t.resume_rendering(); }
+        } _rq(tel_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let an in-flight render_once finish
+        d = fork_pool::run_until_first(works, conc, budget, &any_spawned);
+    }
+
+    if (!d.has_value() && !any_spawned) {
+        // Forking unavailable (resource exhaustion) -> serial fallback so the
+        // RANSAC route is never silently skipped (invariant 6). The serial path
+        // is deadline-gated, so on a genuine no-recovery it is a near-no-op.
+        d = last_resort::ransac_recover(pairs, pubkey_hint, seed,
+                                        last_resort::RANSAC_MAX_ITERS,
+                                        last_resort::ransac_l_candidates(), &tel_);
+    }
+
     if (d.has_value() && utils::verify_pubkey(*d, pubkey_hint)) {
         tel_.active_method = static_cast<int>(RecoveryMethod::AUTO);
         tel_.method_chosen = true;
-        last_resort_desc_ = "outlier-robust RANSAC resampling (bias present in a "
-                            "subset amid non-biased outliers)";
+        last_resort_desc_ = "outlier-robust RANSAC resampling (parallel, fork-isolated)";
         return d;
     }
     return std::nullopt;
