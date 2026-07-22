@@ -1782,6 +1782,33 @@ void test_route_log_scenarios() {
         check(dp && dp->outcome == RouteOutcome::Recovered,
               "(F) dispatch finalized to Recovered by run() after strict verify");
     }
+
+    // (G) Modulo hint on non-windowed data: modulo-hint is a plan step (Attempted),
+    //     dispatch + last-resort are excluded "forced/hinted MODULO", and the
+    //     exactly-once invariant holds for the one mode whose plan step name
+    //     (modulo-hint) shares a prefix with an excluded name (modulo-sweep).
+    {
+        const mpz omega = mpz(1) << 48, bound = mpz(1) << 8;
+        std::mt19937_64 rng(0xef); std::vector<Signature> s;
+        for (size_t i = 1; i <= 12; ++i) {
+            mpz k = 0; for (int b = 0; b < 256; b += 32) { k <<= 32; k += (unsigned long)(rng() & 0xffffffffUL); }
+            k %= SECP256K1_N; if (k == 0) k = 1;
+            s.push_back(make_sig(d, mpz(9000 + (long)i), k, pubkey, i));
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel);
+        engine.run(s, pairs, RecoveryMethod::AUTO, 0, 0.5, DEFAULT_SAMPLING_SEED,
+                   omega, bound, mpz(0), mpz(0), 0.0, true);
+        auto log = tel.get_route_log();
+        check(no_dupes(log), "(G) modulo-hint: no duplicate route names");
+        check(find(log, "modulo-hint") != nullptr, "(G) modulo-hint present as a plan step");
+        for (const char* n : {"dispatch", "shared-prefix", "ransac", "modulo-sweep", "sieve-ladder"}) {
+            auto* r = find(log, n);
+            check(r && r->outcome == RouteOutcome::Skipped &&
+                  r->detail.find("MODULO") != std::string::npos,
+                  std::string("(G) ") + n + " Skipped forced/hinted MODULO");
+        }
+    }
 }
 
 } // namespace
