@@ -1618,15 +1618,18 @@ void test_route_log_executor() {
         check(log.size() == 1 && log[0].outcome == RouteOutcome::Attempted &&
               log[0].detail == "no candidate", "miss logged Attempted/no candidate");
     }
-    // (3) Best-effort unverified that becomes the result -> upgraded to Recovered.
+    // (3) Best-effort unverified that becomes the result -> stays Attempted at the
+    // executor level; run() is the one that finalizes it to Recovered after strict
+    // verify (Tier 2.8 refinement), so calling execute_route_plan directly (as here)
+    // must NOT promote it.
     {
         Telemetry tel; tel.reset(); RecoveryEngine engine(tel);
         RoutePlan p = { mk("be", AcceptPolicy::BEST_EFFORT, false, wrong) };
         RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.0, r);
         auto log = tel.get_route_log();
-        check(log.size() == 1 && log[0].outcome == RouteOutcome::Recovered &&
-              log[0].detail == "best-effort, unverified",
-              "sole unverified best-effort upgraded to Recovered");
+        check(log.size() == 1 && log[0].outcome == RouteOutcome::Attempted &&
+              log[0].detail == "unverified best-effort",
+              "sole unverified best-effort stays Attempted (executor alone does not promote)");
     }
     // (4) ceiling-gated skipped once ceiling exceeded -> Skipped.
     {
@@ -1649,6 +1652,135 @@ void test_route_log_executor() {
         auto log = tel.get_route_log();
         check(log.size() == 1 && log[0].detail == "LATTICE (+alt-bias)",
               "step.detail() overrides default detail");
+    }
+}
+
+void test_route_log_scenarios() {
+    std::cout << "-- route_log end-to-end scenarios (Tier 2.8) --\n";
+    const mpz d("0x1122334455667788112233445566778811223344556677881122334455667788");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    auto find = [](const std::vector<RouteRecord>& log, const std::string& name)
+        -> const RouteRecord* {
+        for (const auto& r : log) if (r.name == name) return &r;
+        return nullptr;
+    };
+    auto no_dupes = [](const std::vector<RouteRecord>& log) {
+        for (size_t a = 0; a < log.size(); ++a)
+            for (size_t b = a + 1; b < log.size(); ++b)
+                if (log[a].name == log[b].name) return false;
+        return true;
+    };
+
+    // (A) Repeated-nonce win: repeated-nonce Recovered; all later routes NotReached.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel); engine.run(s, pairs);
+        auto log = tel.get_route_log();
+        check(no_dupes(log), "(A) no duplicate route names");
+        auto* rn = find(log, "repeated-nonce");
+        check(rn && rn->outcome == RouteOutcome::Recovered, "(A) repeated-nonce Recovered");
+        auto* lr = find(log, "shared-prefix");
+        check(lr && lr->outcome == RouteOutcome::NotReached, "(A) shared-prefix NotReached");
+    }
+
+    // (B) No-pubkey unbiased: last-resort routes Skipped "no pubkey"; dispatch Attempted.
+    {
+        std::mt19937_64 rng(0xabc); std::vector<Signature> s;
+        for (size_t i = 1; i <= 20; ++i) { mpz k=0; for(int b=0;b<256;b+=32){k<<=32; k+=(unsigned long)(rng()&0xffffffffUL);}
+            k %= SECP256K1_N; if(k==0)k=1; auto sg = make_sig(d, mpz(7000+(long)i), k, pubkey, i); sg.pubkey=0; s.push_back(sg); }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel);
+        engine.run(s, pairs, RecoveryMethod::AUTO, 0, 0.5, DEFAULT_SAMPLING_SEED,
+                   mpz(0), mpz(0), mpz(0), mpz(0), 0.0, true);
+        auto log = tel.get_route_log();
+        check(no_dupes(log), "(B) no duplicate route names");
+        for (const char* n : {"shared-prefix", "ransac", "modulo-sweep", "sieve-ladder"}) {
+            auto* r = find(log, n);
+            check(r && r->outcome == RouteOutcome::Skipped && r->detail.find("no pubkey") != std::string::npos,
+                  std::string("(B) ") + n + " Skipped no-pubkey");
+        }
+        auto* dp = find(log, "dispatch");
+        check(dp && dp->outcome == RouteOutcome::Attempted, "(B) dispatch Attempted");
+    }
+
+    // (C) Forced LINEAR on non-LCG: dispatch + last-resort Skipped "excluded by forced LINEAR".
+    {
+        std::mt19937_64 rng(0xdd); std::vector<Signature> s;
+        for (size_t i = 1; i <= 10; ++i) { mpz k=0; for(int b=0;b<256;b+=32){k<<=32; k+=(unsigned long)(rng()&0xffffffffUL);}
+            k %= SECP256K1_N; if(k==0)k=1; s.push_back(make_sig(d, mpz(8000+(long)i), k, pubkey, i)); }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel);
+        engine.run(s, pairs, RecoveryMethod::LINEAR, 0, 0.5, DEFAULT_SAMPLING_SEED,
+                   mpz(0), mpz(0), mpz(0), mpz(0), 0.0, true);
+        auto log = tel.get_route_log();
+        check(no_dupes(log), "(C) no duplicate route names");
+        auto* dp = find(log, "dispatch");
+        check(dp && dp->outcome == RouteOutcome::Skipped &&
+              dp->detail.find("forced LINEAR") != std::string::npos,
+              "(C) dispatch Skipped excluded-by-forced-LINEAR");
+    }
+
+    // (D) Known-LSB LATTICE win: dispatch Recovered, detail contains "LATTICE".
+    {
+        const int b = 32; const mpz two_b = mpz(1) << b; std::mt19937_64 rng(0xC0FFEEULL);
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 40; ++i) {
+            mpz khigh = mpz(static_cast<unsigned long>(rng() % (1ull << 30))) + 1;
+            mpz c = mpz(static_cast<unsigned long>((rng() % (1ull << b)) | 1ull));
+            auto sg = make_sig(d, mpz(2000 + i), khigh * two_b + c, pubkey, i);
+            sg.known_low_bits = b; sg.known_low_value = c; s.push_back(sg);
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel); engine.run(s, pairs);
+        auto log = tel.get_route_log();
+        auto* dp = find(log, "dispatch");
+        check(dp && dp->outcome == RouteOutcome::Recovered &&
+              dp->detail.find("LATTICE") != std::string::npos,
+              "(D) dispatch Recovered via LATTICE");
+    }
+
+    // (E) Determinism: two runs of the same input produce identical route_log.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        Telemetry t1; auto p1 = PairComputer::compute_pairs(s, &t1); RecoveryEngine(t1).run(s, p1);
+        Telemetry t2; auto p2 = PairComputer::compute_pairs(s, &t2); RecoveryEngine(t2).run(s, p2);
+        auto l1 = t1.get_route_log(), l2 = t2.get_route_log();
+        bool same = l1.size() == l2.size();
+        for (size_t k = 0; same && k < l1.size(); ++k)
+            same = l1[k].name == l2[k].name && l1[k].outcome == l2[k].outcome && l1[k].detail == l2[k].detail;
+        check(same, "(E) route_log deterministic across runs");
+    }
+
+    // (F) No-pubkey SUCCESS: mirror of (D) but with no pubkey on any signature.
+    // The dispatch step's candidate is unverified at the executor level (no pubkey
+    // to check against), so it stays provisional/Attempted there; run()'s final
+    // strict verify recovers the real key and finalizes the route to Recovered.
+    {
+        const int b = 32; const mpz two_b = mpz(1) << b; std::mt19937_64 rng(0xC0FFEEULL);
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 40; ++i) {
+            mpz khigh = mpz(static_cast<unsigned long>(rng() % (1ull << 30))) + 1;
+            mpz c = mpz(static_cast<unsigned long>((rng() % (1ull << b)) | 1ull));
+            auto sg = make_sig(d, mpz(2000 + i), khigh * two_b + c, pubkey, i);
+            sg.known_low_bits = b; sg.known_low_value = c; sg.pubkey = 0; s.push_back(sg);
+        }
+        Telemetry tel; auto pairs = PairComputer::compute_pairs(s, &tel);
+        RecoveryEngine engine(tel);
+        RecoveryResult res = engine.run(s, pairs);
+        check(res.success, "(F) no-pubkey known-LSB recovers via final strict verify");
+        auto log = tel.get_route_log();
+        check(no_dupes(log), "(F) no duplicate route names");
+        auto* dp = find(log, "dispatch");
+        check(dp && dp->outcome == RouteOutcome::Recovered,
+              "(F) dispatch finalized to Recovered by run() after strict verify");
     }
 }
 
@@ -1715,6 +1847,8 @@ int main() {
     test_route_log_telemetry();
     std::cout << "\n";
     test_route_log_executor();
+    std::cout << "\n";
+    test_route_log_scenarios();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

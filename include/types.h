@@ -301,6 +301,13 @@ struct Telemetry {
         route_log.push_back(RouteRecord{name, outcome, detail});
     }
 
+    // Finalize a route's outcome after strict verify (route names are unique/run).
+    void amend_route_outcome(const std::string& name, RouteOutcome outcome) {
+        std::lock_guard<std::mutex> lock(str_mutex);
+        for (auto it = route_log.rbegin(); it != route_log.rend(); ++it)
+            if (it->name == name) { it->outcome = outcome; return; }
+    }
+
     std::vector<RouteRecord> get_route_log() const {
         std::lock_guard<std::mutex> lock(str_mutex);
         return route_log;
