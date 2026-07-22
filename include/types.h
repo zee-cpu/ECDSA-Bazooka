@@ -118,6 +118,20 @@ enum class RecoveryMethod {
     SIEVE
 };
 
+// Tier 2.8: durable per-run audit of every recovery route's disposition.
+enum class RouteOutcome {
+    Recovered,   // this route produced the result (verified, or best-effort no-pubkey)
+    Attempted,   // ran, produced no usable key (detail explains, e.g. "g6k unavailable")
+    Skipped,     // never ran (build-excluded / ceiling-gated / no-pubkey)
+    NotReached   // not run because an earlier route already recovered
+};
+
+struct RouteRecord {
+    std::string  name;
+    RouteOutcome outcome;
+    std::string  detail;
+};
+
 // Telemetry state for live dashboard (thread-safe)
 struct Telemetry {
     // Atomic counters for live update
@@ -206,6 +220,7 @@ struct Telemetry {
     std::string status_message;
     std::string recovered_key_hex;
     std::string error_message;
+    std::vector<RouteRecord> route_log;   // guarded by str_mutex
 
     // Timing
     std::chrono::steady_clock::time_point start_time;
@@ -236,6 +251,7 @@ struct Telemetry {
             status_message.clear();
             recovered_key_hex.clear();
             error_message.clear();
+            route_log.clear();
             start_time = std::chrono::steady_clock::now();
         }
     }
@@ -278,6 +294,16 @@ struct Telemetry {
     std::string get_error() const {
         std::lock_guard<std::mutex> lock(str_mutex);
         return error_message;
+    }
+
+    void log_route(const std::string& name, RouteOutcome outcome, const std::string& detail = "") {
+        std::lock_guard<std::mutex> lock(str_mutex);
+        route_log.push_back(RouteRecord{name, outcome, detail});
+    }
+
+    std::vector<RouteRecord> get_route_log() const {
+        std::lock_guard<std::mutex> lock(str_mutex);
+        return route_log;
     }
 };
 

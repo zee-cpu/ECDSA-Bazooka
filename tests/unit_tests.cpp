@@ -1564,6 +1564,25 @@ void test_route_planner() {
           "lazy profiling: profiler never ran on a pre-scan win (confidence stays 0)");
 }
 
+// Tier 2.8: durable per-run audit of every recovery route's disposition.
+void test_route_log_telemetry() {
+    std::cout << "-- Telemetry route_log (Tier 2.8) --\n";
+    Telemetry tel;
+    tel.reset();
+    check(tel.get_route_log().empty(), "route_log empty after reset");
+    tel.log_route("repeated-nonce", RouteOutcome::Attempted, "no candidate");
+    tel.log_route("lcg", RouteOutcome::Recovered, "closed-form");
+    tel.log_route("dispatch", RouteOutcome::NotReached, "recovered earlier");
+    auto log = tel.get_route_log();
+    check(log.size() == 3, "three records logged");
+    check(log[0].name == "repeated-nonce" && log[0].outcome == RouteOutcome::Attempted &&
+          log[0].detail == "no candidate", "record 0 fields");
+    check(log[1].name == "lcg" && log[1].outcome == RouteOutcome::Recovered, "record 1 recovered");
+    check(log[2].outcome == RouteOutcome::NotReached, "record 2 not-reached");
+    tel.reset();
+    check(tel.get_route_log().empty(), "reset clears route_log");
+}
+
 } // namespace
 
 int main() {
@@ -1623,6 +1642,8 @@ int main() {
     test_route_executor();
     std::cout << "\n";
     test_route_planner();
+    std::cout << "\n";
+    test_route_log_telemetry();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;
