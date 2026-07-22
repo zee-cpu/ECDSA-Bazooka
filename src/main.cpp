@@ -377,6 +377,32 @@ int main(int argc, char** argv) {
     std::cout << "  Confidence: p < 10^-" << res.bias_profile.neg_log10_p << "\n";
     std::cout << "  Description: " << res.bias_profile.description << "\n";
 
+    // Tier 2.8: no-silent-skip audit -- every route's disposition. NotReached
+    // routes (an earlier route already recovered) collapse to one line.
+    auto route_log = telemetry.get_route_log();
+    if (!route_log.empty()) {
+        auto outcome_word = [](RouteOutcome o) {
+            switch (o) {
+                case RouteOutcome::Recovered:  return "RECOVERED";
+                case RouteOutcome::Attempted:  return "attempted";
+                case RouteOutcome::Skipped:    return "skipped";
+                case RouteOutcome::NotReached: return "not-reached";
+            }
+            return "?";
+        };
+        std::cout << "Routes attempted/skipped:\n";
+        bool any_not_reached = false;
+        for (const auto& r : route_log) {
+            if (r.outcome == RouteOutcome::NotReached) { any_not_reached = true; continue; }
+            std::cout << "  " << std::left << std::setw(16) << r.name
+                      << std::setw(11) << outcome_word(r.outcome);
+            if (!r.detail.empty()) std::cout << r.detail;
+            std::cout << "\n";
+        }
+        if (any_not_reached)
+            std::cout << "  Remaining routes not attempted (already recovered).\n";
+    }
+
     if (res.success) {
         std::cout << "\n[SUCCESS] Private key recovered and VERIFIED:\n";
         std::cout << "  d = 0x" << res.private_key_hex << "\n";
