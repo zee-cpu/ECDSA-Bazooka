@@ -6,7 +6,7 @@
 // (out-of-process) sieve worker via cffi. Reuses utils::verify_pubkey, so the
 // worker's predicate runs the same EC code as the rest of the tool.
 //
-// This shim depends only on the MIT-licensed secp256k1/utils sources; it links
+// This shim depends only on the tool's own secp256k1/utils sources; it links
 // no lattice/sieve libraries and is safe to build into the main binary.
 extern "C" {
 

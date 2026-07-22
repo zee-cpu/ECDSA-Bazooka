@@ -112,11 +112,14 @@ ctest --test-dir build --output-on-failure -R '^fplll_sanity$'
 ctest --test-dir build --output-on-failure -R '^cli_validation$'
 ctest --test-dir build --output-on-failure -R '^ecc_differential$'
 ctest --test-dir build --output-on-failure -R '^e2e_recovery$'
+ctest --test-dir build --output-on-failure -R '^fixtures_tests$'
 ```
 
-The differential test exits successfully with a skip message when the Python
-`ecdsa` package is unavailable. The end-to-end test is the slowest case and has
-a ten-minute CTest timeout.
+The `ecc_differential` and `fixtures_tests` cases self-skip (reported as
+successful) when their optional Python dependencies — `ecdsa`, and `pytest` for
+the fixtures suite — are unavailable. `e2e_recovery` and `fixtures_tests` are
+the slowest cases (each runs real end-to-end recoveries) and carry the longest
+CTest timeouts; run the fast group above during routine iteration.
 
 ### Complete test preset
 
@@ -181,6 +184,40 @@ See every generator option with:
 python3 scripts/generate_mock_signatures.py --help
 ```
 
+### Labeled fixture corpus
+
+`scripts/generate_mock_signatures.py` prints ground truth only as text.
+`scripts/fixtures/` is a separate, byte-deterministic corpus of incident-anchored
+cases (single/fragmented/mixed leakage, partial reuse, injected outliers) that
+also emit per-signature ground-truth *labels*, used by the regression tests. Its
+pytest suite is what the `fixtures_tests` CTest case runs; invoke it directly
+with:
+
+```bash
+BAZOOKA_BINARY="$PWD/build/ecdsa_nonce_recovery" \
+  python3 scripts/run_fixtures_tests.py
+```
+
+The wrapper exits `77` (CTest "skip") when `pytest` or the Python `ecdsa`
+package is missing, so a box without those optional dependencies skips rather
+than fails. Generated fixtures land in `tests/fixtures/generated/` (git-ignored;
+regenerated on demand).
+
+## Docker
+
+A `Dockerfile` builds the program together with the g6k sieve worker, so the
+image can run every recovery route including the deep-MSB sieve with no host
+setup:
+
+```bash
+docker build -t ecdsa-bazooka .
+docker run --rm -v "$PWD/data:/data" ecdsa-bazooka -i /data/demo.txt -v
+```
+
+For a faster core-only image without the g6k sieve stack, build with
+`--build-arg SKIP_SIEVE=1`. The prebuilt full image is also published to
+`ghcr.io/zee-cpu/ecdsa-bazooka`.
+
 ## Run the program
 
 ### Automatic selection
@@ -193,8 +230,13 @@ is supplied.
 ./build/ecdsa_nonce_recovery -i data/msb_12b_800.txt -q
 ```
 
-The automatic path first checks inexpensive repeated and linear relationships,
-then profiles the remaining input and selects an appropriate lattice route.
+The automatic path first checks inexpensive repeated-nonce and linear (LCG)
+relationships, then profiles the remaining input and selects a lattice or sieve
+route. If nothing is detected, a public-key-gated last-resort ladder
+(shared-prefix reuse, RANSAC resampling for noisy sets, blind modulo sweep,
+speculative sieve) still runs before it reports failure. Every run ends with a
+`Routes attempted/skipped:` audit showing what each route did — recovered,
+attempted, skipped (with reason), or not reached.
 
 ### Select a method
 
