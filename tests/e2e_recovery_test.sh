@@ -98,6 +98,10 @@ if [ -n "$recovered" ] && [ "$recovered" = "$gt" ]; then match=0; else match=1; 
 check "LINEAR (LCG): recovered key matches ground truth" "$match"
 echo "$run_out" | grep -q 'Method: LINEAR'
 check "LINEAR (LCG): reported method is LINEAR (closed-form, not lattice)" "$?"
+echo "$run_out" | grep -q 'Routes attempted/skipped:'
+check "route audit section is printed" "$?"
+echo "$run_out" | grep -q 'Remaining routes not attempted (already recovered).'
+check "closed-form win collapses NotReached routes to one line" "$?"
 
 echo
 echo "=== E2E: unbiased data must NOT produce a false recovery ==="
@@ -112,6 +116,8 @@ python3 "$GEN" --count 800 --bias none --bias-bits 0 --output "$f" --seed 21 > /
 run_out=$(timeout 130 "$BINARY" -i "$f" -q -t 90 2>&1)
 echo "$run_out" | grep -q '\[FAILURE\]'
 check "unbiased data: reports FAILURE (no false positive)" "$?"
+echo "$run_out" | grep -qE 'shared-prefix +skipped|shared-prefix +attempted'
+check "failure run lists last-resort route disposition" "$?"
 
 echo
 echo "=== E2E: blind AUTO recovers a modulo-biased set via the last-resort stage ==="

@@ -567,6 +567,8 @@ RecoveryResult RecoveryEngine::run(
     tel_.set_phase("Verifying candidate");
     std::string details;
     bool verified = Verifier::verify_candidate(result.private_key, signatures, details, &tel_);
+    if (verified && !pending_result_route_.empty())
+        tel_.amend_route_outcome(pending_result_route_, RouteOutcome::Recovered);
 
     result.verification_details = details;
     result.success = verified;

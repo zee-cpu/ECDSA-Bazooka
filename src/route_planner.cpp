@@ -18,6 +18,7 @@ bool RecoveryEngine::execute_route_plan(
     double overall_ceiling,
     RecoveryResult& result)
 {
+    pending_result_route_.clear();
     auto ceiling_hit = [&]() {
         return overall_ceiling > 0.0 && tel_.elapsed_seconds() >= overall_ceiling;
     };
@@ -26,23 +27,58 @@ bool RecoveryEngine::execute_route_plan(
     const RouteStep* winning_step = nullptr;
     const RouteStep* provisional_step = nullptr;
 
-    for (const RouteStep& step : plan) {
-        // Ceiling-skip BEFORE set_budget: a ceiling-skipped step must not mutate
-        // tel_.time_budget_sec (matches old try_last_resort, which set each rung's
-        // budget only inside its `if (!ceiling_hit())` guard).
-        if (step.ceiling_gated && ceiling_hit()) continue;  // Tier 2.8 will log the skip reason here
+    std::vector<RouteRecord> recs;     // flushed to tel_ in plan order at the end
+
+    size_t i = 0;
+    for (; i < plan.size(); ++i) {
+        const RouteStep& step = plan[i];
+        if (step.ceiling_gated && ceiling_hit()) {
+            recs.push_back({step.name, RouteOutcome::Skipped, "budget/ceiling reached"});
+            continue;
+        }
         if (step.set_budget) step.set_budget();
 
         std::optional<mpz> cand = step.attempt();
-        if (!cand.has_value() || *cand == 0) continue;
+        std::string det = step.detail ? step.detail() : "";  // after attempt(): reflects sub-method
 
+        if (!cand.has_value() || *cand == 0) {
+            recs.push_back({step.name, RouteOutcome::Attempted, det.empty() ? "no candidate" : det});
+            continue;
+        }
         bool ok = pubkey_hint > 1 && utils::verify_pubkey(*cand, pubkey_hint);
         if (step.accept == AcceptPolicy::CLOSED_FORM || ok) {
-            winner = cand; winning_step = &step; break;
+            winner = cand; winning_step = &step;
+            if (ok) {
+                recs.push_back({step.name, RouteOutcome::Recovered, det.empty() ? "verified" : det});
+            } else {
+                // Unverified winner (no-pubkey closed-form): final outcome depends on
+                // run()'s strict verify. Log Attempted; run() upgrades to Recovered on success.
+                recs.push_back({step.name, RouteOutcome::Attempted, det.empty() ? "closed-form" : det});
+                pending_result_route_ = step.name;
+            }
+            ++i;
+            break;
         }
         // BEST_EFFORT unverified: keep the FIRST unverified candidate only.
-        if (!provisional.has_value()) { provisional = cand; provisional_step = &step; }
+        if (!provisional.has_value()) {
+            provisional = cand; provisional_step = &step;
+            recs.push_back({step.name, RouteOutcome::Attempted,
+                            det.empty() ? "unverified best-effort" : det});
+        } else {
+            recs.push_back({step.name, RouteOutcome::Attempted,
+                            det.empty() ? "unverified, discarded" : det});
+        }
     }
+    // Steps after a winner were not reached.
+    for (; i < plan.size(); ++i)
+        recs.push_back({plan[i].name, RouteOutcome::NotReached, "recovered earlier"});
+
+    // A best-effort provisional that becomes the result is finalized by run()
+    // after strict verify (Recovered on success, else stays Attempted).
+    if (!winner.has_value() && provisional.has_value() && provisional_step)
+        pending_result_route_ = provisional_step->name;
+    for (const auto& r : recs)
+        tel_.log_route(r.name, r.outcome, r.detail);
 
     const std::optional<mpz>& chosen = winner.has_value() ? winner : provisional;
     const RouteStep* chosen_step   = winner.has_value() ? winning_step : provisional_step;
@@ -168,6 +204,10 @@ RoutePlan RecoveryEngine::build_route_plan(
     RoutePlan plan;
     fail_message = "No candidate produced";
 
+    auto log_excluded = [this](std::initializer_list<const char*> names, const std::string& reason) {
+        for (const char* n : names) tel_.log_route(n, RouteOutcome::Skipped, reason);
+    };
+
     // 1. Closed-form pre-scans (always first; short-circuit on any candidate).
     {
         RouteStep s; s.name = "repeated-nonce"; s.accept = AcceptPolicy::CLOSED_FORM;
@@ -202,6 +242,8 @@ RoutePlan RecoveryEngine::build_route_plan(
     // 2. Forced/hinted terminal plans (no dispatch, no last-resort).
     if (force == RecoveryMethod::LINEAR) {
         fail_message = "No linearly-related (LCG) nonce structure found";
+        log_excluded({"dispatch", "shared-prefix", "ransac", "modulo-sweep", "sieve-ladder"},
+                     "excluded by forced LINEAR");
         return plan;  // only the two closed-form steps; miss -> fail with this message
     }
     if (force == RecoveryMethod::MODULO || (modulo_omega > 0 && modulo_bound > 0)) {
@@ -226,6 +268,8 @@ RoutePlan RecoveryEngine::build_route_plan(
             r.bias_profile.description = "modulo / Extended-HNP: k mod omega in [0, bound)";
         };
         plan.push_back(std::move(s));
+        log_excluded({"dispatch", "shared-prefix", "ransac", "modulo-sweep", "sieve-ladder"},
+                     "excluded by forced/hinted MODULO");
         return plan;
     }
 
@@ -237,6 +281,7 @@ RoutePlan RecoveryEngine::build_route_plan(
         s.attempt = [this, &signatures, &pairs, max_sigs, &pubkey_hint, profile, overall_ceiling, force]()
             -> std::optional<mpz> {
             const BiasProfile& prof = (*profile)();
+            dispatch_alt_bias_ran_ = false;
 
             // FALLBACK-cap gate (moved from recovery_engine.cpp:763-766): cap the
             // fallback heuristic so it can't consume the budget the last-resort
@@ -275,6 +320,7 @@ RoutePlan RecoveryEngine::build_route_plan(
             } else if (chosen == RecoveryMethod::LATTICE) {
                 candidate = try_lattice(pairs, prof, max_sigs, pubkey_hint);
                 if (!verified(candidate) && !tel_.deadline_exceeded()) {
+                    dispatch_alt_bias_ran_ = true;
                     // The profiler's chosen bias shape (MSB vs LSB) is itself a
                     // heuristic call -- if it doesn't check out, try the other
                     // shape before giving up rather than reporting failure outright.
@@ -301,6 +347,17 @@ RoutePlan RecoveryEngine::build_route_plan(
         s.on_win = [this, profile](RecoveryResult& r) {
             r.bias_profile = (*profile)();
             r.method_used = dispatch_method_;
+        };
+        s.detail = [this]() -> std::string {
+            const char* m = "FALLBACK";
+            switch (dispatch_method_) {
+                case RecoveryMethod::SIEVE:   m = "SIEVE"; break;
+                case RecoveryMethod::LATTICE: m = "LATTICE"; break;
+                default: break;   // FALLBACK (or AUTO, unreached)
+            }
+            std::string s = m;
+            if (dispatch_method_ == RecoveryMethod::LATTICE && dispatch_alt_bias_ran_) s += " (+alt-bias)";
+            return s;
         };
         plan.push_back(std::move(s));
     }
@@ -363,6 +420,7 @@ RoutePlan RecoveryEngine::build_route_plan(
             s.accept = AcceptPolicy::VERIFIED_ONLY; s.ceiling_gated = true;
             s.attempt = [this, &signatures, max_sigs, &pubkey_hint, overall_ceiling]()
                 -> std::optional<mpz> {
+                sieve_ladder_detail_.clear();
                 auto verified = [&](const std::optional<mpz>& c) {
                     return c.has_value() && utils::verify_pubkey(*c, pubkey_hint);
                 };
@@ -376,6 +434,7 @@ RoutePlan RecoveryEngine::build_route_plan(
                 const char* ldp = std::getenv("LD_LIBRARY_PATH");
                 if (!sieve_config::python_has_g6k(py ? py : "", pp ? pp : "", ldp ? ldp : "")) {
                     tel_.set_status("last-resort: sieve ladder skipped (g6k unavailable)");
+                    sieve_ladder_detail_ = "g6k unavailable";
                     return std::nullopt;
                 }
                 auto machine = sieve_estimator::detect_machine();
@@ -394,14 +453,21 @@ RoutePlan RecoveryEngine::build_route_plan(
                     prof.bias_detected = true;
                     prof.description = "last-resort speculative sieve L=" + std::to_string(L);
                     tel_.set_status("last-resort: sieve rung L=" + std::to_string(L));
+                    sieve_ladder_detail_ = sieve_ladder_detail_.empty()
+                        ? ("rungs L=" + std::to_string(L))
+                        : (sieve_ladder_detail_ + "," + std::to_string(L));
                     auto d = try_sieve(signatures, prof, max_sigs, pubkey_hint, per_rung);
                     if (verified(d)) return d;
                 }
                 return std::nullopt;
             };
             s.on_win = lr_on_win;
+            s.detail = [this]() { return sieve_ladder_detail_; };
             plan.push_back(std::move(s));
         }
+    } else {
+        log_excluded({"shared-prefix", "ransac", "modulo-sweep", "sieve-ladder"},
+                     "no pubkey -- predicate/gate needs a key");
     }
     return plan;
 }

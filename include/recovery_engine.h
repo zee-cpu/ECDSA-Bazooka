@@ -28,6 +28,10 @@ struct RouteStep {
     std::function<void()> set_budget;                 // may be null; sets tel_.time_budget_sec
     std::function<std::optional<mpz>()> attempt;      // calls an unchanged try_* leaf
     std::function<void(RecoveryResult&)> on_win;      // sets method_used/description/etc.
+    // Optional: composite steps (dispatch, sieve-ladder) return a sub-method /
+    // reason string appended to the executor's route_log record. Called AFTER
+    // attempt() so it can reflect state the attempt set.
+    std::function<std::string()> detail;
 };
 
 using RoutePlan = std::vector<RouteStep>;
@@ -93,6 +97,9 @@ private:
     Telemetry& tel_;
     // Sub-method chosen by the AUTO dispatch step's attempt(), read by its on_win().
     RecoveryMethod dispatch_method_ = RecoveryMethod::AUTO;
+    bool dispatch_alt_bias_ran_ = false;   // set when the dispatch LATTICE path ran the MSB<->LSB retry
+    std::string sieve_ladder_detail_;      // set by the sieve-ladder step's attempt() for its route_log detail
+    std::string pending_result_route_;     // route that produced an UNVERIFIED result; finalized by run()
 
     RoutePlan build_route_plan(
         const std::vector<Signature>& signatures,
