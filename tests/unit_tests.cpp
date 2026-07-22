@@ -1447,6 +1447,81 @@ void test_route_characterization() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Tier 2.7 executor semantics: synthetic RouteSteps exercise every
+// acceptance policy + the short-circuit that guarantees lazy profiling
+// (later steps never run after a terminal win). Uses a real key/pubkey so
+// the executor's pubkey-verify gate behaves as in production.
+// ---------------------------------------------------------------------
+void test_route_executor() {
+    std::cout << "-- route executor acceptance semantics (Tier 2.7) --\n";
+    const mpz d("0x0a1b2c3d4e5f60718293a4b5c6d7e8f9000102030405060708090a0b0c0d0e0f");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz wrong("0x000000000000000000000000000000000000000000000000000000000000002a"); // 42, wrong key
+    const mpz wrong2("0x000000000000000000000000000000000000000000000000000000000000002b"); // 43, also wrong
+
+    auto mk = [](const std::string& n, AcceptPolicy p, bool gated,
+                 std::optional<mpz> cand, RecoveryMethod m, int* ran) {
+        RouteStep s; s.name = n; s.accept = p; s.ceiling_gated = gated;
+        s.attempt = [cand, ran]() { if (ran) (*ran)++; return cand; };
+        s.on_win = [m](RecoveryResult& r) { r.method_used = m; };
+        return s;
+    };
+
+    Telemetry tel; RecoveryEngine engine(tel);
+
+    // (1) CLOSED_FORM short-circuits: step B (and its counter) never runs.
+    int ranB = 0;
+    RoutePlan p1 = {
+        mk("A", AcceptPolicy::CLOSED_FORM, false, d, RecoveryMethod::REPEATED_NONCE, nullptr),
+        mk("B", AcceptPolicy::VERIFIED_ONLY, false, d, RecoveryMethod::AUTO, &ranB),
+    };
+    RecoveryResult r1;
+    bool ok1 = engine.execute_route_plan(p1, pubkey, 0.0, r1);
+    check(ok1 && r1.private_key == d && r1.method_used == RecoveryMethod::REPEATED_NONCE && ranB == 0,
+          "CLOSED_FORM winner short-circuits: later steps never invoked (laziness)");
+
+    // (2) BEST_EFFORT unverified -> provisional; later VERIFIED_ONLY overrides.
+    RoutePlan p2 = {
+        mk("disp", AcceptPolicy::BEST_EFFORT, false, wrong, RecoveryMethod::LATTICE, nullptr),
+        mk("lr",   AcceptPolicy::VERIFIED_ONLY, false, d, RecoveryMethod::AUTO, nullptr),
+    };
+    RecoveryResult r2;
+    bool ok2 = engine.execute_route_plan(p2, pubkey, 0.0, r2);
+    check(ok2 && r2.private_key == d && r2.method_used == RecoveryMethod::AUTO,
+          "BEST_EFFORT unverified is provisional; later verified wins");
+
+    // (3) All unverified BEST_EFFORT: keep FIRST provisional, method from step 1.
+    // Both candidates must be genuinely unverifiable against `pubkey` (neither
+    // is d) -- using the real key `d` here would itself pubkey-verify and
+    // become a terminal winner per the executor's own contract, defeating
+    // the point of this case.
+    RoutePlan p3 = {
+        mk("d1", AcceptPolicy::BEST_EFFORT, false, wrong,  RecoveryMethod::LATTICE,  nullptr),
+        mk("d2", AcceptPolicy::BEST_EFFORT, false, wrong2, RecoveryMethod::FALLBACK, nullptr),
+    };
+    RecoveryResult r3;
+    bool ok3 = engine.execute_route_plan(p3, pubkey, 0.0, r3);
+    check(ok3 && r3.private_key == wrong && r3.method_used == RecoveryMethod::LATTICE,
+          "keep-first-unverified: first BEST_EFFORT provisional survives");
+
+    // (4) ceiling_gated step is skipped when overall_ceiling already exceeded.
+    tel.reset(); tel.time_budget_sec = 0.0;
+    // Force elapsed > ceiling by using a tiny ceiling and a short sleep.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    int ranG = 0;
+    RoutePlan p4 = { mk("gated", AcceptPolicy::VERIFIED_ONLY, true, d, RecoveryMethod::AUTO, &ranG) };
+    RecoveryResult r4;
+    bool ok4 = engine.execute_route_plan(p4, pubkey, 0.001, r4);
+    check(!ok4 && ranG == 0, "ceiling_gated step skipped once overall_ceiling exceeded");
+
+    // (5) No candidate anywhere -> returns false.
+    RoutePlan p5 = { mk("miss", AcceptPolicy::VERIFIED_ONLY, false, std::nullopt, RecoveryMethod::AUTO, nullptr) };
+    RecoveryResult r5;
+    bool ok5 = engine.execute_route_plan(p5, pubkey, 0.0, r5);
+    check(!ok5, "empty plan result -> false (no candidate)");
+}
+
 } // namespace
 
 int main() {
@@ -1502,6 +1577,8 @@ int main() {
     test_fork_pool();
     std::cout << "\n";
     test_route_characterization();
+    std::cout << "\n";
+    test_route_executor();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

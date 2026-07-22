@@ -38,6 +38,7 @@ add_library(ecdsa_recovery_core STATIC
     src/sieve_config.cpp
     src/last_resort.cpp
     src/fork_pool.cpp
+    src/route_planner.cpp
 )
 
 target_include_directories(ecdsa_recovery_core PUBLIC

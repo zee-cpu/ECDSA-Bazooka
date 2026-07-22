@@ -3,6 +3,34 @@
 #include "types.h"
 #include <vector>
 #include <string>
+#include <functional>
+#include <optional>
+
+// Tier 2.7: acceptance policy for a single RouteStep in a RoutePlan (see
+// below). Governs when a step's candidate becomes a terminal winner vs. a
+// provisional (keep-first-unverified) result -- see execute_route_plan's
+// contract for the exact rules.
+enum class AcceptPolicy {
+    CLOSED_FORM,   // any candidate is a terminal winner (short-circuit; strict-verify is the final gate)
+    BEST_EFFORT,   // verified -> terminal; else provisional (keep-first-unverified)
+    VERIFIED_ONLY  // leaf returns only pubkey-verified candidates -> terminal winner
+};
+
+// A single step in a RoutePlan: names one recovery attempt (typically an
+// unchanged try_* leaf), its acceptance policy, whether it should be skipped
+// once overall_ceiling has been exceeded, an optional budget-setter run
+// before the attempt, the attempt itself, and how to record a win into a
+// RecoveryResult.
+struct RouteStep {
+    std::string name;                                 // stable id (for tests + Tier 2.8 logging)
+    AcceptPolicy accept;
+    bool ceiling_gated;                               // honor overall_ceiling before running
+    std::function<void()> set_budget;                 // may be null; sets tel_.time_budget_sec
+    std::function<std::optional<mpz>()> attempt;      // calls an unchanged try_* leaf
+    std::function<void(RecoveryResult&)> on_win;      // sets method_used/description/etc.
+};
+
+using RoutePlan = std::vector<RouteStep>;
 
 class RecoveryEngine {
 public:
@@ -43,8 +71,42 @@ public:
         bool max_time_explicit = false
     );
 
+    // Tier 2.7: walk a RoutePlan in order, running each step's set_budget()
+    // (if set), skipping it if ceiling_gated and overall_ceiling has already
+    // elapsed, else calling attempt(). A CLOSED_FORM candidate, or any
+    // pubkey-verified candidate, is a terminal winner (stop immediately). An
+    // unverified BEST_EFFORT candidate becomes the provisional only if none
+    // is set yet (keep-first-unverified). After the loop, the winner (else
+    // the provisional) is written into result via that step's on_win, and
+    // execute_route_plan returns true; returns false if no candidate was
+    // produced at all. Public: takes an explicit RoutePlan and
+    // RecoveryResult&, so exposing it is harmless (the CLI never calls it
+    // directly) and it is the natural unit-test seam for the executor's
+    // acceptance semantics in isolation from build_route_plan (Task 3).
+    bool execute_route_plan(
+        const RoutePlan& plan,
+        const mpz& pubkey_hint,
+        double overall_ceiling,
+        RecoveryResult& result);
+
 private:
     Telemetry& tel_;
+    // Sub-method chosen by the AUTO dispatch step's attempt(), read by its on_win().
+    RecoveryMethod dispatch_method_ = RecoveryMethod::AUTO;
+
+    RoutePlan build_route_plan(
+        const std::vector<Signature>& signatures,
+        const std::vector<Pair>& pairs,
+        RecoveryMethod force,
+        size_t max_sigs,
+        const mpz& pubkey_hint,
+        const mpz& modulo_omega, const mpz& modulo_bound,
+        const mpz& lcg_a, const mpz& lcg_b,
+        double msb_leaked_bits,
+        double overall_ceiling,
+        bool max_time_explicit,
+        std::string& fail_message);
+
     // Set by a last-resort rung on a verified hit so run() can label the result
     // with the specific rung that recovered (empty -> the generic last-resort
     // description). Cleared before each last-resort stage.
