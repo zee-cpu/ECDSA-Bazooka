@@ -28,6 +28,10 @@ struct RouteStep {
     std::function<void()> set_budget;                 // may be null; sets tel_.time_budget_sec
     std::function<std::optional<mpz>()> attempt;      // calls an unchanged try_* leaf
     std::function<void(RecoveryResult&)> on_win;      // sets method_used/description/etc.
+    // Optional: composite steps (dispatch, sieve-ladder) return a sub-method /
+    // reason string appended to the executor's route_log record. Called AFTER
+    // attempt() so it can reflect state the attempt set.
+    std::function<std::string()> detail;
 };
 
 using RoutePlan = std::vector<RouteStep>;

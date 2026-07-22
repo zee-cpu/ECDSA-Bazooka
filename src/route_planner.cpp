@@ -26,23 +26,55 @@ bool RecoveryEngine::execute_route_plan(
     const RouteStep* winning_step = nullptr;
     const RouteStep* provisional_step = nullptr;
 
-    for (const RouteStep& step : plan) {
-        // Ceiling-skip BEFORE set_budget: a ceiling-skipped step must not mutate
-        // tel_.time_budget_sec (matches old try_last_resort, which set each rung's
-        // budget only inside its `if (!ceiling_hit())` guard).
-        if (step.ceiling_gated && ceiling_hit()) continue;  // Tier 2.8 will log the skip reason here
+    std::vector<RouteRecord> recs;     // flushed to tel_ in plan order at the end
+    size_t provisional_rec = SIZE_MAX; // index into recs of the provisional step
+
+    size_t i = 0;
+    for (; i < plan.size(); ++i) {
+        const RouteStep& step = plan[i];
+        if (step.ceiling_gated && ceiling_hit()) {
+            recs.push_back({step.name, RouteOutcome::Skipped, "budget/ceiling reached"});
+            continue;
+        }
         if (step.set_budget) step.set_budget();
 
         std::optional<mpz> cand = step.attempt();
-        if (!cand.has_value() || *cand == 0) continue;
+        std::string det = step.detail ? step.detail() : "";  // after attempt(): reflects sub-method
 
+        if (!cand.has_value() || *cand == 0) {
+            recs.push_back({step.name, RouteOutcome::Attempted, det.empty() ? "no candidate" : det});
+            continue;
+        }
         bool ok = pubkey_hint > 1 && utils::verify_pubkey(*cand, pubkey_hint);
         if (step.accept == AcceptPolicy::CLOSED_FORM || ok) {
-            winner = cand; winning_step = &step; break;
+            winner = cand; winning_step = &step;
+            recs.push_back({step.name, RouteOutcome::Recovered,
+                            det.empty() ? (ok ? "verified" : "closed-form") : det});
+            ++i;
+            break;
         }
         // BEST_EFFORT unverified: keep the FIRST unverified candidate only.
-        if (!provisional.has_value()) { provisional = cand; provisional_step = &step; }
+        if (!provisional.has_value()) {
+            provisional = cand; provisional_step = &step; provisional_rec = recs.size();
+            recs.push_back({step.name, RouteOutcome::Attempted,
+                            det.empty() ? "unverified best-effort" : det});
+        } else {
+            recs.push_back({step.name, RouteOutcome::Attempted,
+                            det.empty() ? "unverified, discarded" : det});
+        }
     }
+    // Steps after a winner were not reached.
+    for (; i < plan.size(); ++i)
+        recs.push_back({plan[i].name, RouteOutcome::NotReached, "recovered earlier"});
+
+    // If nothing verified but a provisional was held, it becomes the result:
+    // upgrade its record to Recovered (best-effort, unverified).
+    if (!winner.has_value() && provisional.has_value() && provisional_rec != SIZE_MAX) {
+        recs[provisional_rec].outcome = RouteOutcome::Recovered;
+        recs[provisional_rec].detail  = "best-effort, unverified";
+    }
+    for (const auto& r : recs)
+        tel_.log_route(r.name, r.outcome, r.detail);
 
     const std::optional<mpz>& chosen = winner.has_value() ? winner : provisional;
     const RouteStep* chosen_step   = winner.has_value() ? winning_step : provisional_step;

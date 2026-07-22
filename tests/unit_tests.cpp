@@ -1583,6 +1583,75 @@ void test_route_log_telemetry() {
     check(tel.get_route_log().empty(), "reset clears route_log");
 }
 
+void test_route_log_executor() {
+    std::cout << "-- executor route logging (Tier 2.8) --\n";
+    const mpz d("0x0a1b2c3d4e5f60718293a4b5c6d7e8f9000102030405060708090a0b0c0d0e0f");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz wrong("0x000000000000000000000000000000000000000000000000000000000000002a");
+
+    auto mk = [](const std::string& n, AcceptPolicy p, bool gated,
+                 std::optional<mpz> cand) {
+        RouteStep s; s.name = n; s.accept = p; s.ceiling_gated = gated;
+        s.attempt = [cand]() { return cand; };
+        s.on_win = [](RecoveryResult&) {};
+        return s;
+    };
+
+    // (1) Verified winner -> Recovered; later step -> NotReached.
+    {
+        Telemetry tel; tel.reset(); RecoveryEngine engine(tel);
+        RoutePlan p = { mk("a", AcceptPolicy::CLOSED_FORM, false, d),
+                        mk("b", AcceptPolicy::VERIFIED_ONLY, false, d) };
+        RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.0, r);
+        auto log = tel.get_route_log();
+        check(log.size() == 2 && log[0].name == "a" && log[0].outcome == RouteOutcome::Recovered,
+              "winner logged Recovered");
+        check(log[1].name == "b" && log[1].outcome == RouteOutcome::NotReached,
+              "post-winner step logged NotReached");
+    }
+    // (2) No candidate -> Attempted "no candidate".
+    {
+        Telemetry tel; tel.reset(); RecoveryEngine engine(tel);
+        RoutePlan p = { mk("miss", AcceptPolicy::VERIFIED_ONLY, false, std::nullopt) };
+        RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.0, r);
+        auto log = tel.get_route_log();
+        check(log.size() == 1 && log[0].outcome == RouteOutcome::Attempted &&
+              log[0].detail == "no candidate", "miss logged Attempted/no candidate");
+    }
+    // (3) Best-effort unverified that becomes the result -> upgraded to Recovered.
+    {
+        Telemetry tel; tel.reset(); RecoveryEngine engine(tel);
+        RoutePlan p = { mk("be", AcceptPolicy::BEST_EFFORT, false, wrong) };
+        RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.0, r);
+        auto log = tel.get_route_log();
+        check(log.size() == 1 && log[0].outcome == RouteOutcome::Recovered &&
+              log[0].detail == "best-effort, unverified",
+              "sole unverified best-effort upgraded to Recovered");
+    }
+    // (4) ceiling-gated skipped once ceiling exceeded -> Skipped.
+    {
+        Telemetry tel; tel.reset();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        RecoveryEngine engine(tel);
+        RoutePlan p = { mk("g", AcceptPolicy::VERIFIED_ONLY, true, d) };
+        RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.001, r);
+        auto log = tel.get_route_log();
+        check(log.size() == 1 && log[0].outcome == RouteOutcome::Skipped &&
+              log[0].detail == "budget/ceiling reached", "ceiling-skip logged Skipped");
+    }
+    // (5) step.detail() is used when set.
+    {
+        Telemetry tel; tel.reset(); RecoveryEngine engine(tel);
+        RouteStep s = mk("disp", AcceptPolicy::CLOSED_FORM, false, d);
+        s.detail = []() { return std::string("LATTICE (+alt-bias)"); };
+        RoutePlan p = { s };
+        RecoveryResult r; engine.execute_route_plan(p, pubkey, 0.0, r);
+        auto log = tel.get_route_log();
+        check(log.size() == 1 && log[0].detail == "LATTICE (+alt-bias)",
+              "step.detail() overrides default detail");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1644,6 +1713,8 @@ int main() {
     test_route_planner();
     std::cout << "\n";
     test_route_log_telemetry();
+    std::cout << "\n";
+    test_route_log_executor();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;
