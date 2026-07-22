@@ -107,6 +107,15 @@ private:
         bool max_time_explicit,
         std::string& fail_message);
 
+    // Tier 2.7: memoized bias profile for the AUTO dispatch step. Returns a
+    // callable that computes the profile at most once, only when first invoked,
+    // so a closed-form pre-scan win never triggers profiling (preserves run()'s
+    // laziness). Encapsulates the per-signature-MSB / supplied-MSB / known-LSB /
+    // statistical-with-PROFILER_CAP branch selection.
+    std::function<const BiasProfile&()> make_lazy_profile(
+        const std::vector<Signature>& signatures, const std::vector<Pair>& pairs,
+        double msb_leaked_bits, double overall_ceiling, bool max_time_explicit);
+
     // Set by a last-resort rung on a verified hit so run() can label the result
     // with the specific rung that recovered (empty -> the generic last-resort
     // description). Cleared before each last-resort stage.
@@ -147,16 +156,6 @@ private:
                                         const mpz& pubkey_hint,
                                         const mpz& lcg_a, const mpz& lcg_b, bool forced);
 
-    bool dispatch_and_recover(
-        const BiasProfile& profile,
-        const std::vector<Signature>& signatures,
-        const std::vector<Pair>& pairs,
-        RecoveryMethod force,
-        size_t max_sigs,
-        const mpz& pubkey_hint,
-        RecoveryResult& result
-    );
-
     // Sieving-with-predicate route (L<=3 MSB, pubkey required). Serializes the
     // signatures + compressed pubkey and delegates to the external GPL g6k
     // worker (worker_cli.py) over a subprocess boundary, reading back the
@@ -192,18 +191,4 @@ private:
     // last_resort.cpp.
     std::optional<mpz> try_shared_prefix_reuse(
         const std::vector<Pair>& pairs, const mpz& pubkey_hint);
-
-    // AUTO last-resort stage: after every cheaper method has failed and a pubkey
-    // is present, blindly attempt the modulo/EHNP window sweep, then a
-    // speculative deep-MSB sieve ladder over every RAM-feasible rung. Each
-    // sub-stage gets its OWN bounded budget (so the lattice methods converge
-    // instead of over-exploring), all clamped to overall_ceiling when set
-    // (absolute seconds-from-start; 0 == no overall limit). Pubkey-gated;
-    // returns a verified key or nullopt. Defined in last_resort.cpp.
-    std::optional<mpz> try_last_resort(
-        const std::vector<Signature>& signatures,
-        const std::vector<Pair>& pairs,
-        const mpz& pubkey_hint,
-        size_t max_sigs,
-        double overall_ceiling);
 };

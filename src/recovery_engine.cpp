@@ -57,24 +57,6 @@ namespace {
         for (size_t i = 0; i < N; ++i) { mpz v = M[i][N] % n; if (v < 0) v += n; sol[i] = v; }
         return sol;
     }
-
-    // Phase 6b: the shared known-low-bit width if EVERY valid signature carries
-    // the same one, else 0. Requiring all valid sigs to be annotated (no zeros
-    // mixed in) is deliberate -- an un-annotated pair would be misread as "low
-    // bits == 0" and corrupt the lattice, so partial annotation disables the
-    // known-LSB path and we fall back to statistical detection.
-    int uniform_known_low_bits(const std::vector<Signature>& sigs) {
-        int b = 0;
-        bool any = false;
-        for (const auto& s : sigs) {
-            if (!s.valid) continue;
-            any = true;
-            if (s.known_low_bits <= 0) return 0;
-            if (b == 0) b = s.known_low_bits;
-            else if (s.known_low_bits != b) return 0;
-        }
-        return any ? b : 0;
-    }
 }
 
 RecoveryEngine::RecoveryEngine(Telemetry& tel) : tel_(tel) {}
@@ -519,72 +501,6 @@ std::optional<mpz> RecoveryEngine::try_sieve(
     return d;
 }
 
-bool RecoveryEngine::dispatch_and_recover(
-    const BiasProfile& profile,
-    const std::vector<Signature>& signatures,
-    const std::vector<Pair>& pairs,
-    RecoveryMethod force,
-    size_t max_sigs,
-    const mpz& pubkey_hint,
-    RecoveryResult& result
-) {
-    result.bias_profile = profile;
-    result.signatures_used = pairs.size();
-
-    RecoveryMethod chosen = force;
-    if (chosen == RecoveryMethod::AUTO) {
-        // Deep MSB leakage (L<=3) is past the lattice barrier: plain LLL/BKZ
-        // cannot reach it. Route to the sieving-with-predicate worker instead,
-        // but only when a public key is present -- the predicate IS the pubkey
-        // check, so without one the method does not exist. L>=4 (and any
-        // no-pubkey case) keeps the existing Phase 1/2 behaviour untouched.
-        if (profile.bias_detected && profile.type == BiasType::MSB &&
-            profile.estimated_leaked_bits <= 3.0 && pubkey_hint > 1) {
-            chosen = RecoveryMethod::SIEVE;
-        } else if (profile.bias_detected && profile.estimated_leaked_bits >= 3.0) {
-            chosen = RecoveryMethod::LATTICE;
-        } else {
-            chosen = RecoveryMethod::FALLBACK;
-        }
-    }
-
-    std::optional<mpz> candidate;
-
-    auto verified = [&](const std::optional<mpz>& c) {
-        return c.has_value() && pubkey_hint > 0 && utils::verify_pubkey(*c, pubkey_hint);
-    };
-
-    if (chosen == RecoveryMethod::SIEVE) {
-        candidate = try_sieve(signatures, profile, max_sigs, pubkey_hint);
-    } else if (chosen == RecoveryMethod::LATTICE) {
-        candidate = try_lattice(pairs, profile, max_sigs, pubkey_hint);
-        if (!verified(candidate) && !tel_.deadline_exceeded()) {
-            // The profiler's chosen bias shape (MSB vs LSB) is itself a
-            // heuristic call -- if it doesn't check out, try the other
-            // shape before giving up rather than reporting failure outright.
-            BiasProfile alt = profile;
-            alt.type = (profile.type == BiasType::MSB) ? BiasType::LSB : BiasType::MSB;
-            auto alt_cand = try_lattice(pairs, alt, max_sigs, pubkey_hint);
-            if (verified(alt_cand) || !candidate.has_value()) {
-                candidate = alt_cand;
-            }
-        }
-    } else {
-        candidate = try_fallback_ladder(pairs, profile, max_sigs, pubkey_hint);
-    }
-
-    if (!candidate.has_value() || *candidate == 0) {
-        result.success = false;
-        result.verification_details = "No candidate produced";
-        return false;
-    }
-
-    result.private_key = *candidate;
-    result.private_key_hex = utils::mpz_to_hex(*candidate);
-    result.method_used = chosen;
-    return true;
-}
-
 RecoveryResult RecoveryEngine::run(
     const std::vector<Signature>& signatures,
     const std::vector<Pair>& pairs,
@@ -625,172 +541,26 @@ RecoveryResult RecoveryEngine::run(
         }
     }
 
-    // Phase 6a pre-scan: a reused nonce is the most common catastrophic ECDSA
-    // RNG failure in the wild (Sony PS3, the 2013 Android SecureRandom Bitcoin
-    // thefts). It is not a *bias* the lattice can exploit -- it is a nonce
-    // *collision* that hands over the key by closed-form algebra, from as few
-    // as two signatures, in O(n log n). So check it first and short-circuit
-    // the entire profile/lattice pipeline on a verified hit. When there's no
-    // collision this is a cheap no-op and recovery proceeds normally.
-    if (auto rn = try_repeated_nonce(signatures, pubkey_hint)) {
-        result.private_key = *rn;
-        result.private_key_hex = utils::mpz_to_hex(*rn);
-        result.method_used = RecoveryMethod::REPEATED_NONCE;
-        result.signatures_used = signatures.size();
-        result.bias_profile.description =
-            "Reused nonce (r-collision) -- recovered by closed-form algebra, no lattice";
-    } else if (auto ln = try_linear_nonce(signatures, pairs, pubkey_hint, lcg_a, lcg_b,
-                                          force_method == RecoveryMethod::LINEAR)) {
-        // Phase 6d pre-scan: linearly-related (LCG) nonces yield the key by
-        // closed-form algebra (a small modular linear system over consecutive
-        // signatures), no lattice -- like the repeated-nonce case. Cheap and
-        // pubkey-gated, so it runs on every AUTO recovery and a spurious solve
-        // on non-LCG data is discarded rather than returned.
-        result.private_key = *ln;
-        result.private_key_hex = utils::mpz_to_hex(*ln);
-        result.method_used = RecoveryMethod::LINEAR;
-        result.signatures_used = signatures.size();
-        tel_.active_method = static_cast<int>(RecoveryMethod::LINEAR);
-        tel_.method_chosen = true;
-        result.bias_profile.description =
-            (lcg_a > 0
-                 ? "Linearly-related nonces (LCG, known multiplier) -- closed-form, no lattice"
-                 : "Linearly-related nonces (LCG) -- closed-form 4x4 solve, no lattice");
-    } else if (force_method == RecoveryMethod::LINEAR) {
-        // Forced LINEAR but no such structure found: fail honestly rather than
-        // silently falling through to statistical profiling.
+    // Tier 2.7: assemble the ordered recovery plan (closed-form pre-scans ->
+    // forced/hinted terminals -> AUTO dispatch -> last-resort rungs) and walk it
+    // through the single executor. build_route_plan relocates the former
+    // pre-scan/forced/AUTO/last-resort escalation into RouteSteps verbatim; the
+    // executor enforces the accept policies (short-circuit on a closed-form or
+    // pubkey-verified candidate; keep-first-unverified otherwise) and the strict
+    // verification below remains the final proof gate.
+    double overall_ceiling = max_time_explicit ? max_time_sec : 0.0;
+    std::string fail_message;
+    RoutePlan plan = build_route_plan(signatures, pairs, force_method, max_sigs, pubkey_hint,
+                                      modulo_omega, modulo_bound, lcg_a, lcg_b, msb_leaked_bits,
+                                      overall_ceiling, max_time_explicit, fail_message);
+    result.bias_profile = BiasProfile{};   // steps' on_win fill fields where the old code did
+    result.signatures_used = pairs.size();
+    bool produced = execute_route_plan(plan, pubkey_hint, overall_ceiling, result);
+    if (!produced || result.private_key == 0) {
         result.success = false;
-        result.verification_details = "No linearly-related (LCG) nonce structure found";
+        result.verification_details = fail_message;
         tel_.recovery_complete = true;
         return result;
-    } else if (force_method == RecoveryMethod::MODULO ||
-               (modulo_omega > 0 && modulo_bound > 0)) {
-        // Phase 6c: modulo / Extended-HNP. Either the (omega,bound) is supplied
-        // as a hint (route straight to the EHNP lattice, skipping statistical
-        // detection, exactly as the known-LSB path does) or `-m modulo` forces a
-        // blind sweep over common windows. Not reachable from plain AUTO -- see
-        // try_modulo for why the blind sweep is opt-in.
-        auto d = try_modulo(pairs, modulo_omega, modulo_bound, max_sigs, pubkey_hint);
-        if (d.has_value()) {
-            result.private_key = *d;
-            result.private_key_hex = utils::mpz_to_hex(*d);
-            result.method_used = RecoveryMethod::MODULO;
-            result.signatures_used = pairs.size();
-            result.bias_profile.type = BiasType::MODULO;
-            result.bias_profile.modulo_omega = modulo_omega;
-            result.bias_profile.modulo_bound = modulo_bound;
-            result.bias_profile.bias_detected = true;
-            result.bias_profile.description =
-                "modulo / Extended-HNP: k mod omega in [0, bound)";
-        } else {
-            result.success = false;
-            result.verification_details = "No candidate produced (modulo/EHNP)";
-            tel_.recovery_complete = true;
-            return result;
-        }
-    } else {
-        BiasProfile profile;
-        int known_bits = uniform_known_low_bits(signatures);
-        // Per-signature MSB leakage supplied in the input (LeakedBits: N on every
-        // valid signature). The exact per-signature bounds drive the sieve; the
-        // average sets the profile/gate. Takes precedence over the global hint.
-        size_t n_valid = 0, n_leaked = 0;
-        double sum_leaked = 0.0;
-        for (const auto& s : signatures) {
-            if (!s.valid) continue;
-            n_valid++;
-            if (s.msb_leaked_bits > 0) { n_leaked++; sum_leaked += s.msb_leaked_bits; }
-        }
-        bool per_signature_leak = (n_valid > 0 && n_leaked == n_valid);
-        if (per_signature_leak) {
-            profile.type = BiasType::MSB;
-            profile.estimated_leaked_bits = sum_leaked / static_cast<double>(n_valid);
-            profile.bias_detected = true;
-            profile.description = "MSB leak (per-signature supplied): avg " +
-                std::to_string(profile.estimated_leaked_bits) + " leaked high bit(s)";
-            tel_.set_phase("Per-signature-MSB recovery");
-            tel_.leaked_bits_est = profile.estimated_leaked_bits;
-            tel_.bias_type = static_cast<int>(BiasType::MSB);
-        } else if (msb_leaked_bits > 0.0) {
-            // Sieve hint: the MSB-zero leakage width is *supplied* (side-channel
-            // model), not detected. Build the MSB profile directly so the deep-leak
-            // sieve route has the exact L it needs -- statistical detection fails at
-            // L<=3 with the small sample counts the sieve uses. May be fractional.
-            profile.type = BiasType::MSB;
-            profile.estimated_leaked_bits = msb_leaked_bits;
-            profile.bias_detected = true;
-            profile.description = "MSB leak (supplied): " +
-                std::to_string(msb_leaked_bits) + " leaked high bit(s)";
-            tel_.set_phase("Supplied-MSB recovery");
-            tel_.leaked_bits_est = msb_leaked_bits;
-            tel_.bias_type = static_cast<int>(BiasType::MSB);
-        } else if (known_bits > 0) {
-            // Phase 6b: the leak is *supplied*, not detected. Build the profile
-            // directly and let the lattice use each pair's known low-bit residue
-            // (Pair::known_low_value, folded in by transform_pairs_lsb). This is
-            // the side-channel model: known bits are exact, so we skip the
-            // statistical detector entirely rather than re-discovering them.
-            profile.type = BiasType::LSB;
-            profile.estimated_leaked_bits = static_cast<double>(known_bits);
-            profile.bias_detected = true;
-            profile.description = "known-LSB: " + std::to_string(known_bits) +
-                " leaked low bit(s) supplied per signature";
-            tel_.set_phase("Known-LSB recovery");
-            tel_.leaked_bits_est = static_cast<double>(known_bits);
-            tel_.bias_type = static_cast<int>(BiasType::LSB);
-        } else {
-            // Profile. With an unbounded budget the statistical profiler
-            // over-explores (heavy lattice work) for minutes on data with no
-            // detectable bias, starving dispatch + last-resort. Cap it -- a
-            // missed detection merely routes to fallback/last-resort (the net).
-            tel_.set_phase("Profiling bias");
-            double saved_budget = tel_.time_budget_sec;
-            double oc = max_time_explicit ? max_time_sec : 0.0;
-            tel_.time_budget_sec = last_resort::stage_deadline(
-                oc, tel_.elapsed_seconds(), last_resort::PROFILER_CAP_SEC);
-            profile = BiasProfiler::profile(pairs, &tel_);
-            tel_.time_budget_sec = saved_budget;
-        }
-
-        // Overall time ceiling: an explicit --max-time bounds the WHOLE run;
-        // otherwise there is no overall limit (each stage is still individually
-        // bounded below). 0 == no overall limit.
-        double overall_ceiling = max_time_explicit ? max_time_sec : 0.0;
-        // Cap the fallback heuristic so it can't consume the budget the
-        // last-resort stage needs. Only when nothing was detected (dispatch will
-        // route to FALLBACK) and a pubkey is present (last-resort applies);
-        // detected biases route to SIEVE/LATTICE and keep the full budget.
-        if (pubkey_hint > 1 && !profile.bias_detected) {
-            tel_.time_budget_sec = last_resort::stage_deadline(
-                overall_ceiling, tel_.elapsed_seconds(), last_resort::FALLBACK_CAP_SEC);
-        }
-
-        bool dispatch_ok = dispatch_and_recover(profile, signatures, pairs, force_method, max_sigs, pubkey_hint, result);
-
-        // Run the last-resort stage unless dispatch already produced a
-        // pubkey-VERIFIED key. dispatch may leave an UNVERIFIED best-effort
-        // candidate in result.private_key (confirmed later by strict
-        // verification) -- that must not suppress last-resort.
-        bool dispatch_verified = dispatch_ok && result.private_key != 0 &&
-            pubkey_hint > 1 && utils::verify_pubkey(result.private_key, pubkey_hint);
-        if (!dispatch_verified && pubkey_hint > 1) {
-            last_resort_desc_.clear();
-            if (auto lr = try_last_resort(signatures, pairs, pubkey_hint, max_sigs, overall_ceiling)) {
-                result.private_key = *lr;
-                result.private_key_hex = utils::mpz_to_hex(*lr);
-                result.method_used = RecoveryMethod::AUTO;
-                result.signatures_used = pairs.size();
-                result.bias_profile.description = last_resort_desc_.empty()
-                    ? "last-resort recovery (blind modulo/sieve)"
-                    : last_resort_desc_;
-            }
-        }
-        if (result.private_key == 0) {
-            result.success = false;
-            result.verification_details = "No candidate produced";
-            tel_.recovery_complete = true;
-            return result;
-        }
     }
 
     // Strict verification

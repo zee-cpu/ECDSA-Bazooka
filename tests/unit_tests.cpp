@@ -1522,6 +1522,31 @@ void test_route_executor() {
     check(!ok5, "empty plan result -> false (no candidate)");
 }
 
+// ---------------------------------------------------------------------
+// Tier 2.7 planner structure: build_route_plan is private, so assert plan
+// SHAPE indirectly through run()-level behavior already covered by the
+// characterization test, PLUS a direct laziness probe: a repeated-nonce win
+// must not invoke the profiler. Observable: BiasProfiler sets tel.confidence
+// (neg_log10_p) only when it runs; a pre-scan win leaves it at the reset 0.
+// ---------------------------------------------------------------------
+void test_route_planner() {
+    std::cout << "-- route planner laziness (Tier 2.7) --\n";
+    const mpz d("0x1122334455667788112233445566778811223344556677881122334455667788");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+    std::vector<Signature> s;
+    s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+    s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(s, &tel);
+    RecoveryEngine engine(tel);
+    RecoveryResult r = engine.run(s, pairs);
+    check(r.success && r.method_used == RecoveryMethod::REPEATED_NONCE,
+          "repeated-nonce recovers via closed-form pre-scan");
+    check(tel.confidence.load() == 0.0,
+          "lazy profiling: profiler never ran on a pre-scan win (confidence stays 0)");
+}
+
 } // namespace
 
 int main() {
@@ -1579,6 +1604,8 @@ int main() {
     test_route_characterization();
     std::cout << "\n";
     test_route_executor();
+    std::cout << "\n";
+    test_route_planner();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

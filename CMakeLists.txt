@@ -113,7 +113,11 @@ install(TARGETS ecdsa_nonce_recovery DESTINATION bin)
 # For testing convenience
 enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
-set_tests_properties(unit_tests PROPERTIES TIMEOUT 30)
+# Raised from 30s: the Tier 2.7 route-characterization test adds several real
+# in-process recovery runs (known-LSB + modulo LLL, LCG, budget-bounded
+# failure paths), pushing the suite to ~40s. 120s keeps a comfortable margin
+# on a loaded box while still catching a genuine hang.
+set_tests_properties(unit_tests PROPERTIES TIMEOUT 120)
 add_test(NAME fplll_sanity COMMAND fplll_sanity_test)
 
 add_test(
