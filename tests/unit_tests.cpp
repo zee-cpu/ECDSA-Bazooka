@@ -1340,6 +1340,230 @@ void test_fork_pool() {
           "fork_pool: run_until_first sets any_spawned=true on a successful spawn");
 }
 
+// ---------------------------------------------------------------------
+// Tier 2.7 characterization: locks the SEMANTIC tuple {key, success,
+// method_used} + determinism across every route-plan shape and acceptance
+// policy, so the routing refactor is provably behavior-preserving. Each case
+// builds signatures with a known d, so the expected key is self-evident.
+// ---------------------------------------------------------------------
+void test_route_characterization() {
+    std::cout << "-- route characterization (Tier 2.7 semantic-equivalence lock) --\n";
+    const mpz d("0x0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    auto run_case = [](const std::vector<Signature>& sigs, RecoveryMethod force,
+                       const mpz& omega, const mpz& bound,
+                       const mpz& lcg_a, const mpz& lcg_b, double budget, bool explicit_budget) {
+        Telemetry tel;
+        auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        return engine.run(sigs, pairs, force, 0, budget, DEFAULT_SAMPLING_SEED,
+                          omega, bound, lcg_a, lcg_b, 0.0, explicit_budget);
+    };
+
+    // (A) CLOSED_FORM: repeated nonce -> REPEATED_NONCE.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::REPEATED_NONCE && r.private_key == d,
+              "repeated-nonce -> {success, REPEATED_NONCE, key==d}");
+    }
+
+    // (B) CLOSED_FORM: unknown-(a,b) LCG -> LINEAR.
+    {
+        const mpz a("0x9e3779b97f4a7c15abcdef0123456789abcdef0123456789abcdef0123456789");
+        const mpz b("0x1234567890fedcba1234567890fedcba1234567890fedcba1234567890fedcba");
+        std::vector<Signature> s; mpz k = mpz("0xdeadbeefcafef00d1122334455667788990011223344556677889900aabbccdd") % SECP256K1_N;
+        for (int i = 0; i < 8; ++i) { auto sg = make_sig(d, mpz(5000 + i), k, pubkey, i + 1);
+            sg.timestamp = i + 1; sg.timestamp_present = true; s.push_back(sg); k = (a * k + b) % SECP256K1_N; }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::LINEAR && r.private_key == d,
+              "unknown-(a,b) LCG -> {success, LINEAR, key==d}");
+    }
+
+    // (C) BEST_EFFORT dispatch: known-LSB -> LATTICE (fast: small high parts).
+    {
+        const int b = 32; const mpz two_b = mpz(1) << b;
+        std::mt19937_64 rng(0xC0FFEEULL);
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 40; ++i) {
+            mpz khigh = mpz(static_cast<unsigned long>(rng() % (1ull << 30))) + 1;
+            mpz c = mpz(static_cast<unsigned long>((rng() % (1ull << b)) | 1ull));
+            auto sg = make_sig(d, mpz(2000 + i), khigh * two_b + c, pubkey, i);
+            sg.known_low_bits = b; sg.known_low_value = c; s.push_back(sg);
+        }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::LATTICE && r.private_key == d,
+              "known-LSB -> {success, LATTICE, key==d}");
+        // Regression lock for the dispatch-win bias_profile fix: a LATTICE win via
+        // the dispatch step must report the resolved profile (type/leaked bits/
+        // detected), not the default NONE/0 that blanked out before the fix.
+        check(r.bias_profile.type == BiasType::LSB && r.bias_profile.bias_detected &&
+              r.bias_profile.estimated_leaked_bits == static_cast<double>(b),
+              "dispatch LATTICE win reports resolved bias_profile (LSB, leaked==b), not NONE/0");
+    }
+
+    // (D) VERIFIED_ONLY hint: modulo/EHNP -> MODULO.
+    {
+        const mpz omega = mpz(1) << 48, bound = mpz(1) << 8;
+        const mpz mu_bound = SECP256K1_N / omega;
+        std::mt19937_64 rng(0x6d6f64756c6fULL);
+        auto rb = [&](int bits){ mpz v=0; for(int i=0;i<bits;i+=32){v<<=32; v+=static_cast<unsigned long>(rng()&0xffffffffULL);} return v; };
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 16; ++i) { mpz k = (rb(64) % bound) + omega * (rb(256) % mu_bound); if (k==0) k=1;
+            s.push_back(make_sig(d, mpz(3000 + static_cast<long>(i)), k, pubkey, i)); }
+        auto r = run_case(s, RecoveryMethod::AUTO, omega, bound, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::MODULO && r.private_key == d,
+              "modulo hint -> {success, MODULO, key==d}");
+
+        // (D2) BEST_EFFORT no-pubkey modulo hint: recover_modulo returns an
+        // UNVERIFIED best-effort candidate (no pubkey to gate against); the plan
+        // has no last-resort steps, so it becomes the provisional result and the
+        // final strict verify (against the signatures, not a pubkey) recovers d.
+        // Regression lock for the VERIFIED_ONLY->BEST_EFFORT fix: VERIFIED_ONLY
+        // dropped this candidate and reported "No candidate produced (modulo/EHNP)".
+        auto nopk = s; for (auto& x : nopk) x.pubkey = 0;
+        auto r2 = run_case(nopk, RecoveryMethod::AUTO, omega, bound, 0, 0, 0.0, false);
+        check(r2.success && r2.private_key == d,
+              "no-pubkey modulo hint -> {success, key==d} via final strict verify");
+    }
+
+    // (E) Determinism: repeated-nonce case twice yields identical tuple.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        auto r1 = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        auto r2 = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r1.success == r2.success && r1.method_used == r2.method_used &&
+              r1.private_key_hex == r2.private_key_hex,
+              "determinism: identical {success, method, key} across runs");
+    }
+
+    // (F) Failure paths: honest success==false, preserved exactly.
+    {
+        // Unbiased + pubkey + tiny explicit budget -> reaches last-resort, fails.
+        std::mt19937_64 rng(0xabc); std::vector<Signature> s;
+        for (size_t i = 1; i <= 20; ++i) { mpz k=0; for(int b=0;b<256;b+=32){k<<=32; k+=(unsigned long)(rng()&0xffffffffUL);}
+            k %= SECP256K1_N; if(k==0)k=1; s.push_back(make_sig(d, mpz(7000+(long)i), k, pubkey, i)); }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.5, true);
+        check(!r.success, "unbiased+pubkey -> honest failure through last-resort");
+
+        // Forced LINEAR on non-LCG data -> honest failure.
+        auto rl = run_case(s, RecoveryMethod::LINEAR, 0, 0, 0, 0, 0.5, true);
+        check(!rl.success, "forced-LINEAR on non-LCG -> honest failure");
+
+        // No pubkey -> last-resort skipped, honest failure.
+        auto nopk = s; for (auto& x : nopk) x.pubkey = 0;
+        auto rn = run_case(nopk, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.5, true);
+        check(!rn.success, "no-pubkey unbiased -> honest failure, last-resort skipped");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tier 2.7 executor semantics: synthetic RouteSteps exercise every
+// acceptance policy + the short-circuit that guarantees lazy profiling
+// (later steps never run after a terminal win). Uses a real key/pubkey so
+// the executor's pubkey-verify gate behaves as in production.
+// ---------------------------------------------------------------------
+void test_route_executor() {
+    std::cout << "-- route executor acceptance semantics (Tier 2.7) --\n";
+    const mpz d("0x0a1b2c3d4e5f60718293a4b5c6d7e8f9000102030405060708090a0b0c0d0e0f");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz wrong("0x000000000000000000000000000000000000000000000000000000000000002a"); // 42, wrong key
+    const mpz wrong2("0x000000000000000000000000000000000000000000000000000000000000002b"); // 43, also wrong
+
+    auto mk = [](const std::string& n, AcceptPolicy p, bool gated,
+                 std::optional<mpz> cand, RecoveryMethod m, int* ran) {
+        RouteStep s; s.name = n; s.accept = p; s.ceiling_gated = gated;
+        s.attempt = [cand, ran]() { if (ran) (*ran)++; return cand; };
+        s.on_win = [m](RecoveryResult& r) { r.method_used = m; };
+        return s;
+    };
+
+    Telemetry tel; RecoveryEngine engine(tel);
+
+    // (1) CLOSED_FORM short-circuits: step B (and its counter) never runs.
+    int ranB = 0;
+    RoutePlan p1 = {
+        mk("A", AcceptPolicy::CLOSED_FORM, false, d, RecoveryMethod::REPEATED_NONCE, nullptr),
+        mk("B", AcceptPolicy::VERIFIED_ONLY, false, d, RecoveryMethod::AUTO, &ranB),
+    };
+    RecoveryResult r1;
+    bool ok1 = engine.execute_route_plan(p1, pubkey, 0.0, r1);
+    check(ok1 && r1.private_key == d && r1.method_used == RecoveryMethod::REPEATED_NONCE && ranB == 0,
+          "CLOSED_FORM winner short-circuits: later steps never invoked (laziness)");
+
+    // (2) BEST_EFFORT unverified -> provisional; later VERIFIED_ONLY overrides.
+    RoutePlan p2 = {
+        mk("disp", AcceptPolicy::BEST_EFFORT, false, wrong, RecoveryMethod::LATTICE, nullptr),
+        mk("lr",   AcceptPolicy::VERIFIED_ONLY, false, d, RecoveryMethod::AUTO, nullptr),
+    };
+    RecoveryResult r2;
+    bool ok2 = engine.execute_route_plan(p2, pubkey, 0.0, r2);
+    check(ok2 && r2.private_key == d && r2.method_used == RecoveryMethod::AUTO,
+          "BEST_EFFORT unverified is provisional; later verified wins");
+
+    // (3) All unverified BEST_EFFORT: keep FIRST provisional, method from step 1.
+    // Both candidates must be genuinely unverifiable against `pubkey` (neither
+    // is d) -- using the real key `d` here would itself pubkey-verify and
+    // become a terminal winner per the executor's own contract, defeating
+    // the point of this case.
+    RoutePlan p3 = {
+        mk("d1", AcceptPolicy::BEST_EFFORT, false, wrong,  RecoveryMethod::LATTICE,  nullptr),
+        mk("d2", AcceptPolicy::BEST_EFFORT, false, wrong2, RecoveryMethod::FALLBACK, nullptr),
+    };
+    RecoveryResult r3;
+    bool ok3 = engine.execute_route_plan(p3, pubkey, 0.0, r3);
+    check(ok3 && r3.private_key == wrong && r3.method_used == RecoveryMethod::LATTICE,
+          "keep-first-unverified: first BEST_EFFORT provisional survives");
+
+    // (4) ceiling_gated step is skipped when overall_ceiling already exceeded.
+    tel.reset(); tel.time_budget_sec = 0.0;
+    // Force elapsed > ceiling by using a tiny ceiling and a short sleep.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    int ranG = 0;
+    RoutePlan p4 = { mk("gated", AcceptPolicy::VERIFIED_ONLY, true, d, RecoveryMethod::AUTO, &ranG) };
+    RecoveryResult r4;
+    bool ok4 = engine.execute_route_plan(p4, pubkey, 0.001, r4);
+    check(!ok4 && ranG == 0, "ceiling_gated step skipped once overall_ceiling exceeded");
+
+    // (5) No candidate anywhere -> returns false.
+    RoutePlan p5 = { mk("miss", AcceptPolicy::VERIFIED_ONLY, false, std::nullopt, RecoveryMethod::AUTO, nullptr) };
+    RecoveryResult r5;
+    bool ok5 = engine.execute_route_plan(p5, pubkey, 0.0, r5);
+    check(!ok5, "empty plan result -> false (no candidate)");
+}
+
+// ---------------------------------------------------------------------
+// Tier 2.7 planner structure: build_route_plan is private, so assert plan
+// SHAPE indirectly through run()-level behavior already covered by the
+// characterization test, PLUS a direct laziness probe: a repeated-nonce win
+// must not invoke the profiler. Observable: BiasProfiler sets tel.confidence
+// (neg_log10_p) only when it runs; a pre-scan win leaves it at the reset 0.
+// ---------------------------------------------------------------------
+void test_route_planner() {
+    std::cout << "-- route planner laziness (Tier 2.7) --\n";
+    const mpz d("0x1122334455667788112233445566778811223344556677881122334455667788");
+    const mpz pubkey = utils::compute_pubkey(d);
+    const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+    std::vector<Signature> s;
+    s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+    s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+    Telemetry tel;
+    auto pairs = PairComputer::compute_pairs(s, &tel);
+    RecoveryEngine engine(tel);
+    RecoveryResult r = engine.run(s, pairs);
+    check(r.success && r.method_used == RecoveryMethod::REPEATED_NONCE,
+          "repeated-nonce recovers via closed-form pre-scan");
+    check(tel.confidence.load() == 0.0,
+          "lazy profiling: profiler never ran on a pre-scan win (confidence stays 0)");
+}
+
 } // namespace
 
 int main() {
@@ -1393,6 +1617,12 @@ int main() {
     test_ec_point_arithmetic();
     std::cout << "\n";
     test_fork_pool();
+    std::cout << "\n";
+    test_route_characterization();
+    std::cout << "\n";
+    test_route_executor();
+    std::cout << "\n";
+    test_route_planner();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;

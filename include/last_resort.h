@@ -7,7 +7,8 @@
 #include <cstdint>
 
 // Wiring for AUTO's last-resort stage. Pure helpers here are unit-tested; the
-// RecoveryEngine::try_last_resort method that uses them lives in last_resort.cpp.
+// last-resort route steps that use them are assembled in RecoveryEngine::
+// build_route_plan (src/route_planner.cpp).
 namespace last_resort {
 
     // Cap (s) for the statistical bias profiler. Detection is cheap; with an

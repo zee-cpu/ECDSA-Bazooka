@@ -38,6 +38,7 @@ add_library(ecdsa_recovery_core STATIC
     src/sieve_config.cpp
     src/last_resort.cpp
     src/fork_pool.cpp
+    src/route_planner.cpp
 )
 
 target_include_directories(ecdsa_recovery_core PUBLIC
@@ -112,7 +113,12 @@ install(TARGETS ecdsa_nonce_recovery DESTINATION bin)
 # For testing convenience
 enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
-set_tests_properties(unit_tests PROPERTIES TIMEOUT 30)
+# Raised from 30s: the Tier 2.7 route-characterization test adds several real
+# in-process recovery runs (known-LSB + modulo LLL, LCG, budget-bounded
+# failure paths). After the lazy-g6k-probe fix the warm suite is ~20-25s, but a
+# cold run has been seen near 30s, so 120s keeps a comfortable margin on a
+# loaded/cold box while still catching a genuine hang.
+set_tests_properties(unit_tests PROPERTIES TIMEOUT 120)
 add_test(NAME fplll_sanity COMMAND fplll_sanity_test)
 
 add_test(
