@@ -1398,6 +1398,12 @@ void test_route_characterization() {
         auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
         check(r.success && r.method_used == RecoveryMethod::LATTICE && r.private_key == d,
               "known-LSB -> {success, LATTICE, key==d}");
+        // Regression lock for the dispatch-win bias_profile fix: a LATTICE win via
+        // the dispatch step must report the resolved profile (type/leaked bits/
+        // detected), not the default NONE/0 that blanked out before the fix.
+        check(r.bias_profile.type == BiasType::LSB && r.bias_profile.bias_detected &&
+              r.bias_profile.estimated_leaked_bits == static_cast<double>(b),
+              "dispatch LATTICE win reports resolved bias_profile (LSB, leaked==b), not NONE/0");
     }
 
     // (D) VERIFIED_ONLY hint: modulo/EHNP -> MODULO.
@@ -1412,6 +1418,17 @@ void test_route_characterization() {
         auto r = run_case(s, RecoveryMethod::AUTO, omega, bound, 0, 0, 0.0, false);
         check(r.success && r.method_used == RecoveryMethod::MODULO && r.private_key == d,
               "modulo hint -> {success, MODULO, key==d}");
+
+        // (D2) BEST_EFFORT no-pubkey modulo hint: recover_modulo returns an
+        // UNVERIFIED best-effort candidate (no pubkey to gate against); the plan
+        // has no last-resort steps, so it becomes the provisional result and the
+        // final strict verify (against the signatures, not a pubkey) recovers d.
+        // Regression lock for the VERIFIED_ONLY->BEST_EFFORT fix: VERIFIED_ONLY
+        // dropped this candidate and reported "No candidate produced (modulo/EHNP)".
+        auto nopk = s; for (auto& x : nopk) x.pubkey = 0;
+        auto r2 = run_case(nopk, RecoveryMethod::AUTO, omega, bound, 0, 0, 0.0, false);
+        check(r2.success && r2.private_key == d,
+              "no-pubkey modulo hint -> {success, key==d} via final strict verify");
     }
 
     // (E) Determinism: repeated-nonce case twice yields identical tuple.

@@ -27,8 +27,11 @@ bool RecoveryEngine::execute_route_plan(
     const RouteStep* provisional_step = nullptr;
 
     for (const RouteStep& step : plan) {
-        if (step.set_budget) step.set_budget();
+        // Ceiling-skip BEFORE set_budget: a ceiling-skipped step must not mutate
+        // tel_.time_budget_sec (matches old try_last_resort, which set each rung's
+        // budget only inside its `if (!ceiling_hit())` guard).
         if (step.ceiling_gated && ceiling_hit()) continue;  // Tier 2.8 will log the skip reason here
+        if (step.set_budget) step.set_budget();
 
         std::optional<mpz> cand = step.attempt();
         if (!cand.has_value() || *cand == 0) continue;
@@ -203,7 +206,14 @@ RoutePlan RecoveryEngine::build_route_plan(
     }
     if (force == RecoveryMethod::MODULO || (modulo_omega > 0 && modulo_bound > 0)) {
         fail_message = "No candidate produced (modulo/EHNP)";
-        RouteStep s; s.name = "modulo-hint"; s.accept = AcceptPolicy::VERIFIED_ONLY; s.ceiling_gated = false;
+        // BEST_EFFORT (not VERIFIED_ONLY): try_modulo->recover_modulo returns an
+        // UNVERIFIED best-effort candidate when there is no pubkey (pubkey_hint<=1);
+        // the OLD run() modulo path accepted `if (d.has_value())` and let the final
+        // strict verify gate it. With a pubkey the candidate is pubkey-verified ->
+        // terminal winner (unchanged); with no pubkey it becomes the provisional
+        // and -- this plan has no last-resort steps -- the result, gated by the
+        // final strict verify. VERIFIED_ONLY would wrongly drop the no-pubkey case.
+        RouteStep s; s.name = "modulo-hint"; s.accept = AcceptPolicy::BEST_EFFORT; s.ceiling_gated = false;
         s.attempt = [this, &pairs, modulo_omega, modulo_bound, max_sigs, &pubkey_hint]() {
             return try_modulo(pairs, modulo_omega, modulo_bound, max_sigs, pubkey_hint);
         };
@@ -282,7 +292,16 @@ RoutePlan RecoveryEngine::build_route_plan(
             dispatch_method_ = chosen;  // read by on_win to report the sub-method
             return candidate;
         };
-        s.on_win = [this](RecoveryResult& r) { r.method_used = dispatch_method_; };
+        // Old dispatch_and_recover set `result.bias_profile = profile;` so
+        // SIEVE/LATTICE/FALLBACK wins report the real profile (type, leaked bits,
+        // description). Restore that: the memoized profile was already resolved by
+        // attempt() above, so `(*profile)()` returns the SAME cached BiasProfile the
+        // dispatch used (no recompute). Only fires when the dispatch step is chosen,
+        // so it never disturbs the modulo/closed-form/last-resort on_wins.
+        s.on_win = [this, profile](RecoveryResult& r) {
+            r.bias_profile = (*profile)();
+            r.method_used = dispatch_method_;
+        };
         plan.push_back(std::move(s));
     }
 
@@ -297,14 +316,19 @@ RoutePlan RecoveryEngine::build_route_plan(
                 ? "last-resort recovery (blind modulo/sieve)" : last_resort_desc_;
             r.signatures_used = tel_.signatures_valid.load();
         };
+        // `phase` (non-empty only on the FIRST rung) restores the dropped
+        // telemetry set_phase("Exhaustive last-resort search (may take longer)")
+        // that old try_last_resort emitted once when the last-resort stage began.
         auto add_lr = [&](const std::string& name, const std::string& status, double cap,
-                          AcceptPolicy pol, std::function<std::optional<mpz>()> att) {
+                          AcceptPolicy pol, std::function<std::optional<mpz>()> att,
+                          const std::string& phase = "") {
             RouteStep s; s.name = name; s.accept = pol; s.ceiling_gated = true;
             s.set_budget = [this, overall_ceiling, cap]() {
                 tel_.time_budget_sec = last_resort::stage_deadline(
                     overall_ceiling, tel_.elapsed_seconds(), cap);
             };
-            s.attempt = [this, status, att = std::move(att)]() -> std::optional<mpz> {
+            s.attempt = [this, status, phase, att = std::move(att)]() -> std::optional<mpz> {
+                if (!phase.empty()) tel_.set_phase(phase);
                 tel_.set_status(status);
                 return att();
             };
@@ -314,7 +338,8 @@ RoutePlan RecoveryEngine::build_route_plan(
         last_resort_desc_.clear();
         add_lr("shared-prefix", "last-resort: shared-prefix nonce reuse",
                last_resort::SHARED_PREFIX_CAP_SEC, AcceptPolicy::VERIFIED_ONLY,
-               [this, &pairs, &pubkey_hint]() { return try_shared_prefix_reuse(pairs, pubkey_hint); });
+               [this, &pairs, &pubkey_hint]() { return try_shared_prefix_reuse(pairs, pubkey_hint); },
+               "Exhaustive last-resort search (may take longer)");
         add_lr("ransac", "last-resort: RANSAC resampling",
                last_resort::RANSAC_CAP_SEC, AcceptPolicy::VERIFIED_ONLY,
                [this, &pairs, &pubkey_hint]() { return try_ransac_resample(pairs, pubkey_hint); });
@@ -322,48 +347,60 @@ RoutePlan RecoveryEngine::build_route_plan(
                last_resort::MODULO_SWEEP_SEC, AcceptPolicy::VERIFIED_ONLY,
                [this, &pairs, max_sigs, &pubkey_hint]() { return try_modulo(pairs, mpz(0), mpz(0), max_sigs, pubkey_hint); });
 
-        // Speculative deep-MSB sieve ladder (moved from last_resort.cpp:245-275):
-        // one VERIFIED_ONLY ceiling-gated step per RAM-feasible rung, shallow->deep,
-        // each with its own generous per-rung cap. Emitted only when g6k is
-        // available (preserves the current skip). The g6k probe + feasible_rungs
-        // are evaluated here at plan-build time.
-        sieve_config::ensure_env();
-        const char* py  = std::getenv("BAZOOKA_SIEVE_PYTHON");
-        const char* pp  = std::getenv("PYTHONPATH");
-        const char* ldp = std::getenv("LD_LIBRARY_PATH");
-        if (sieve_config::python_has_g6k(py ? py : "", pp ? pp : "", ldp ? ldp : "")) {
-            auto machine = sieve_estimator::detect_machine();
-            for (double L : last_resort::feasible_rungs(machine)) {
-                auto per_rung_cell = std::make_shared<double>(last_resort::PER_RUNG_CEILING_SEC);
-                RouteStep s;
-                s.name = "sieve-rung-L=" + std::to_string(L);
-                s.accept = AcceptPolicy::VERIFIED_ONLY;
-                s.ceiling_gated = true;
-                s.set_budget = [this, overall_ceiling, per_rung_cell]() {
+        // Speculative deep-MSB sieve ladder: ONE VERIFIED_ONLY, ceiling-gated
+        // last-resort step whose attempt() holds the OLD try_last_resort sieve
+        // stage VERBATIM -- the g6k-availability probe (with its skip status +
+        // early return), detect_machine(), and the feasible_rungs loop with its
+        // per-rung ceiling check + per-rung budget. Running the probe+loop LAZILY
+        // at execution time (only if this step is reached) is behavior-preserving:
+        // the old code ran the probe only WHEN last-resort reached the sieve stage,
+        // not eagerly at plan-build time (which forked a Python subprocess and
+        // emitted a misplaced skip status for every AUTO recovery -- a perf +
+        // logging regression). This deliberately deviates from the plan's
+        // "one step per rung" wording, which caused that bug.
+        {
+            RouteStep s; s.name = "sieve-ladder";
+            s.accept = AcceptPolicy::VERIFIED_ONLY; s.ceiling_gated = true;
+            s.attempt = [this, &signatures, max_sigs, &pubkey_hint, overall_ceiling]()
+                -> std::optional<mpz> {
+                auto verified = [&](const std::optional<mpz>& c) {
+                    return c.has_value() && utils::verify_pubkey(*c, pubkey_hint);
+                };
+                auto ceiling_hit = [&]() {
+                    return overall_ceiling > 0.0 && tel_.elapsed_seconds() >= overall_ceiling;
+                };
+                if (ceiling_hit()) return std::nullopt;
+                sieve_config::ensure_env();
+                const char* py  = std::getenv("BAZOOKA_SIEVE_PYTHON");
+                const char* pp  = std::getenv("PYTHONPATH");
+                const char* ldp = std::getenv("LD_LIBRARY_PATH");
+                if (!sieve_config::python_has_g6k(py ? py : "", pp ? pp : "", ldp ? ldp : "")) {
+                    tel_.set_status("last-resort: sieve ladder skipped (g6k unavailable)");
+                    return std::nullopt;
+                }
+                auto machine = sieve_estimator::detect_machine();
+                for (double L : last_resort::feasible_rungs(machine)) {
+                    if (ceiling_hit()) break;
                     double per_rung = last_resort::PER_RUNG_CEILING_SEC;   // generous per-rung cap
                     if (overall_ceiling > 0.0) {
                         double remaining = overall_ceiling - tel_.elapsed_seconds();
-                        // remaining <= 0 -> the step is ceiling-skipped by the executor.
-                        if (remaining > 0.0) per_rung = std::min(per_rung, remaining);
+                        if (remaining <= 0.0) break;
+                        per_rung = std::min(per_rung, remaining);
                     }
-                    *per_rung_cell = per_rung;
                     tel_.time_budget_sec = tel_.elapsed_seconds() + per_rung;  // bound this rung
-                };
-                s.attempt = [this, &signatures, max_sigs, &pubkey_hint, L, per_rung_cell]()
-                    -> std::optional<mpz> {
                     BiasProfile prof;
                     prof.type = BiasType::MSB;
                     prof.estimated_leaked_bits = L;
                     prof.bias_detected = true;
                     prof.description = "last-resort speculative sieve L=" + std::to_string(L);
                     tel_.set_status("last-resort: sieve rung L=" + std::to_string(L));
-                    return try_sieve(signatures, prof, max_sigs, pubkey_hint, *per_rung_cell);
-                };
-                s.on_win = lr_on_win;
-                plan.push_back(std::move(s));
-            }
-        } else {
-            tel_.set_status("last-resort: sieve ladder skipped (g6k unavailable)");
+                    auto d = try_sieve(signatures, prof, max_sigs, pubkey_hint, per_rung);
+                    if (verified(d)) return d;
+                }
+                return std::nullopt;
+            };
+            s.on_win = lr_on_win;
+            plan.push_back(std::move(s));
         }
     }
     return plan;

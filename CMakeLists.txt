@@ -115,8 +115,9 @@ enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
 # Raised from 30s: the Tier 2.7 route-characterization test adds several real
 # in-process recovery runs (known-LSB + modulo LLL, LCG, budget-bounded
-# failure paths), pushing the suite to ~40s. 120s keeps a comfortable margin
-# on a loaded box while still catching a genuine hang.
+# failure paths). After the lazy-g6k-probe fix the warm suite is ~20-25s, but a
+# cold run has been seen near 30s, so 120s keeps a comfortable margin on a
+# loaded/cold box while still catching a genuine hang.
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 120)
 add_test(NAME fplll_sanity COMMAND fplll_sanity_test)
 
