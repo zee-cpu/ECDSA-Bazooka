@@ -1340,6 +1340,113 @@ void test_fork_pool() {
           "fork_pool: run_until_first sets any_spawned=true on a successful spawn");
 }
 
+// ---------------------------------------------------------------------
+// Tier 2.7 characterization: locks the SEMANTIC tuple {key, success,
+// method_used} + determinism across every route-plan shape and acceptance
+// policy, so the routing refactor is provably behavior-preserving. Each case
+// builds signatures with a known d, so the expected key is self-evident.
+// ---------------------------------------------------------------------
+void test_route_characterization() {
+    std::cout << "-- route characterization (Tier 2.7 semantic-equivalence lock) --\n";
+    const mpz d("0x0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0");
+    const mpz pubkey = utils::compute_pubkey(d);
+
+    auto run_case = [](const std::vector<Signature>& sigs, RecoveryMethod force,
+                       const mpz& omega, const mpz& bound,
+                       const mpz& lcg_a, const mpz& lcg_b, double budget, bool explicit_budget) {
+        Telemetry tel;
+        auto pairs = PairComputer::compute_pairs(sigs, &tel);
+        RecoveryEngine engine(tel);
+        return engine.run(sigs, pairs, force, 0, budget, DEFAULT_SAMPLING_SEED,
+                          omega, bound, lcg_a, lcg_b, 0.0, explicit_budget);
+    };
+
+    // (A) CLOSED_FORM: repeated nonce -> REPEATED_NONCE.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::REPEATED_NONCE && r.private_key == d,
+              "repeated-nonce -> {success, REPEATED_NONCE, key==d}");
+    }
+
+    // (B) CLOSED_FORM: unknown-(a,b) LCG -> LINEAR.
+    {
+        const mpz a("0x9e3779b97f4a7c15abcdef0123456789abcdef0123456789abcdef0123456789");
+        const mpz b("0x1234567890fedcba1234567890fedcba1234567890fedcba1234567890fedcba");
+        std::vector<Signature> s; mpz k = mpz("0xdeadbeefcafef00d1122334455667788990011223344556677889900aabbccdd") % SECP256K1_N;
+        for (int i = 0; i < 8; ++i) { auto sg = make_sig(d, mpz(5000 + i), k, pubkey, i + 1);
+            sg.timestamp = i + 1; sg.timestamp_present = true; s.push_back(sg); k = (a * k + b) % SECP256K1_N; }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::LINEAR && r.private_key == d,
+              "unknown-(a,b) LCG -> {success, LINEAR, key==d}");
+    }
+
+    // (C) BEST_EFFORT dispatch: known-LSB -> LATTICE (fast: small high parts).
+    {
+        const int b = 32; const mpz two_b = mpz(1) << b;
+        std::mt19937_64 rng(0xC0FFEEULL);
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 40; ++i) {
+            mpz khigh = mpz(static_cast<unsigned long>(rng() % (1ull << 30))) + 1;
+            mpz c = mpz(static_cast<unsigned long>((rng() % (1ull << b)) | 1ull));
+            auto sg = make_sig(d, mpz(2000 + i), khigh * two_b + c, pubkey, i);
+            sg.known_low_bits = b; sg.known_low_value = c; s.push_back(sg);
+        }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::LATTICE && r.private_key == d,
+              "known-LSB -> {success, LATTICE, key==d}");
+    }
+
+    // (D) VERIFIED_ONLY hint: modulo/EHNP -> MODULO.
+    {
+        const mpz omega = mpz(1) << 48, bound = mpz(1) << 8;
+        const mpz mu_bound = SECP256K1_N / omega;
+        std::mt19937_64 rng(0x6d6f64756c6fULL);
+        auto rb = [&](int bits){ mpz v=0; for(int i=0;i<bits;i+=32){v<<=32; v+=static_cast<unsigned long>(rng()&0xffffffffULL);} return v; };
+        std::vector<Signature> s;
+        for (size_t i = 1; i <= 16; ++i) { mpz k = (rb(64) % bound) + omega * (rb(256) % mu_bound); if (k==0) k=1;
+            s.push_back(make_sig(d, mpz(3000 + static_cast<long>(i)), k, pubkey, i)); }
+        auto r = run_case(s, RecoveryMethod::AUTO, omega, bound, 0, 0, 0.0, false);
+        check(r.success && r.method_used == RecoveryMethod::MODULO && r.private_key == d,
+              "modulo hint -> {success, MODULO, key==d}");
+    }
+
+    // (E) Determinism: repeated-nonce case twice yields identical tuple.
+    {
+        const mpz kr("0x00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef00abcdef");
+        std::vector<Signature> s;
+        s.push_back(make_sig(d, mpz("0xdeadbeef01"), kr, pubkey, 1));
+        s.push_back(make_sig(d, mpz("0xdeadbeef02"), kr, pubkey, 2));
+        auto r1 = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        auto r2 = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.0, false);
+        check(r1.success == r2.success && r1.method_used == r2.method_used &&
+              r1.private_key_hex == r2.private_key_hex,
+              "determinism: identical {success, method, key} across runs");
+    }
+
+    // (F) Failure paths: honest success==false, preserved exactly.
+    {
+        // Unbiased + pubkey + tiny explicit budget -> reaches last-resort, fails.
+        std::mt19937_64 rng(0xabc); std::vector<Signature> s;
+        for (size_t i = 1; i <= 20; ++i) { mpz k=0; for(int b=0;b<256;b+=32){k<<=32; k+=(unsigned long)(rng()&0xffffffffUL);}
+            k %= SECP256K1_N; if(k==0)k=1; s.push_back(make_sig(d, mpz(7000+(long)i), k, pubkey, i)); }
+        auto r = run_case(s, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.5, true);
+        check(!r.success, "unbiased+pubkey -> honest failure through last-resort");
+
+        // Forced LINEAR on non-LCG data -> honest failure.
+        auto rl = run_case(s, RecoveryMethod::LINEAR, 0, 0, 0, 0, 0.5, true);
+        check(!rl.success, "forced-LINEAR on non-LCG -> honest failure");
+
+        // No pubkey -> last-resort skipped, honest failure.
+        auto nopk = s; for (auto& x : nopk) x.pubkey = 0;
+        auto rn = run_case(nopk, RecoveryMethod::AUTO, 0, 0, 0, 0, 0.5, true);
+        check(!rn.success, "no-pubkey unbiased -> honest failure, last-resort skipped");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1393,6 +1500,8 @@ int main() {
     test_ec_point_arithmetic();
     std::cout << "\n";
     test_fork_pool();
+    std::cout << "\n";
+    test_route_characterization();
 
     std::cout << "\n=== " << (g_checks - g_failures) << "/" << g_checks << " checks passed ===\n";
     return g_failures == 0 ? 0 : 1;
